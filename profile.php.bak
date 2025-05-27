@@ -1,0 +1,2223 @@
+<?php
+// Pre-parsing for any JSON data that might be included in the output
+// This is an instant fix to handle any JSON output at the beginning of the response
+// We'll buffer all output so we can extract any JSON data
+ob_start();
+
+// Get any existing output (might contain JSON)
+$existingOutput = ob_get_clean();
+if (!empty($existingOutput)) {
+    // Try to find JSON data at the beginning
+    $jsonStart = strpos($existingOutput, '{');
+    $jsonEnd = strpos($existingOutput, '<!DOCTYPE html>');
+    
+    if ($jsonStart !== false && $jsonEnd !== false) {
+        $jsonString = substr($existingOutput, $jsonStart, $jsonEnd - $jsonStart);
+        $jsonData = json_decode($jsonString, true);
+        
+        // If we have valid JSON data, extract it for use in the template
+        if ($jsonData && is_array($jsonData)) {
+            // Start a new output buffer for the rest of the page
+            ob_start();
+            
+            // Echo the HTML part back to the output
+            echo substr($existingOutput, $jsonEnd);
+            
+            // Store the extracted data for later use in the template
+            $profileData = $jsonData;
+            $skills = $jsonData['skills'] ?? [];
+            $education = $jsonData['education'] ?? [];
+            $experience = $jsonData['experience'] ?? [];
+            $projects = $jsonData['projects'] ?? [];
+            $certifications = $jsonData['certifications'] ?? [];
+        } else {
+            // No valid JSON, just echo everything back
+            ob_start();
+            echo $existingOutput;
+        }
+    } else {
+        // No JSON structure found, just echo everything back
+        ob_start();
+        echo $existingOutput;
+    }
+}
+
+// Now continue with regular script
+if (!isset($profileData)) {
+    // Include database configuration
+    require_once 'config.php';
+    require_once 'functions.php';
+    
+    // Start session if not already started
+    if (session_status() == PHP_SESSION_NONE) {
+        session_start();
+    }
+
+    // Check if user is logged in using utility function
+    if (!is_logged_in()) {
+        redirect('login.php');
+        exit;
+    }
+
+    // Function to check if a table exists
+    function tableExists($conn, $tableName) {
+        $tableName = sanitize_db_input($tableName, $conn);
+        $result = $conn->query("SHOW TABLES LIKE '{$tableName}'");
+        return $result->num_rows > 0;
+    }
+
+    // Check if required tables exist, redirect to setup if not
+    $requiredTables = ['students', 'experience', 'projects', 'certifications', 'notifications'];
+    $missingTables = [];
+
+    foreach ($requiredTables as $table) {
+        if (!tableExists($conn, $table)) {
+            $missingTables[] = $table;
+        }
+    }
+
+    if (!empty($missingTables)) {
+        // Redirect to setup script if tables are missing
+        redirect('setup_profile_tables.php');
+        exit;
+    }
+
+    $user_id = get_user_id();
+    $response = [];
+
+    // Initialize all necessary variables before using them
+    $profileData = [];
+    $skills = [];
+    $education = [];
+    $experience = [];
+    $projects = [];
+    $certifications = [];
+    $applications = [];
+    $notifications = [];
+    $recommendedSkills = [];
+    $unreadNotifications = 0;
+    $availableSkills = [];
+
+    // Initialize branch - this is referenced but might not be set
+    $branch = '';
+
+    // Get user information
+    $sql = "SELECT u.*, s.* 
+            FROM users u
+            LEFT JOIN students s ON u.id = s.user_id
+            WHERE u.id = " . sanitize_db_input($user_id, $conn);
+    $result = mysqli_query($conn, $sql);
+    if ($result && mysqli_num_rows($result) > 0) {
+        $profileData = mysqli_fetch_assoc($result);
+    }
+
+    // Get user skills
+    $sql = "SELECT * FROM skills WHERE user_id = " . sanitize_db_input($user_id, $conn);
+    $skills_result = mysqli_query($conn, $sql);
+    if ($skills_result) {
+        while ($skill = mysqli_fetch_assoc($skills_result)) {
+            $skills[] = $skill;
+        }
+    }
+
+    // Get applications 
+    $sql = "SELECT a.*, j.title as job_title, c.name as company_name 
+             FROM applications a 
+             JOIN jobs j ON a.job_id = j.id 
+             JOIN companies c ON j.company_id = c.id 
+             WHERE a.user_id = " . sanitize_db_input($user_id, $conn) . " 
+             ORDER BY a.applied_date DESC";
+    $applications_result = mysqli_query($conn, $sql);
+    $applications = [];
+    if ($applications_result) {
+        while ($app = mysqli_fetch_assoc($applications_result)) {
+            $applications[] = $app;
+        }
+    }
+
+    // Get education history without end_date sorting
+    $sql = "SELECT * FROM education WHERE user_id = " . sanitize_db_input($user_id, $conn) . " ORDER BY created_at DESC";
+    $education_result = mysqli_query($conn, $sql);
+    if ($education_result) {
+        while ($edu = mysqli_fetch_assoc($education_result)) {
+            $education[] = $edu;
+        }
+    }
+
+    // Get experience without end_date sorting
+    $sql = "SELECT * FROM experience WHERE user_id = " . sanitize_db_input($user_id, $conn) . " ORDER BY created_at DESC";
+    $experience_result = mysqli_query($conn, $sql);
+    if ($experience_result) {
+        while ($exp = mysqli_fetch_assoc($experience_result)) {
+            $experience[] = $exp;
+        }
+    }
+
+    // Get projects without completion_date sorting
+    $sql = "SELECT * FROM projects WHERE user_id = " . sanitize_db_input($user_id, $conn) . " ORDER BY created_at DESC";
+    $projects_result = mysqli_query($conn, $sql);
+    if ($projects_result) {
+        while ($proj = mysqli_fetch_assoc($projects_result)) {
+            $projects[] = $proj;
+        }
+    }
+
+    // Get certifications
+    $sql = "SELECT * FROM certifications WHERE user_id = " . sanitize_db_input($user_id, $conn) . " ORDER BY created_at DESC";
+    $certifications_result = mysqli_query($conn, $sql);
+    if ($certifications_result) {
+        while ($cert = mysqli_fetch_assoc($certifications_result)) {
+            $certifications[] = $cert;
+        }
+    }
+
+    // Get unread notifications count
+    $sql = "SELECT COUNT(*) as count FROM notifications WHERE user_id = " . sanitize_db_input($user_id, $conn) . " AND is_read = 0";
+    $notif_result = mysqli_query($conn, $sql);
+    $unreadNotifications = 0;
+    if ($notif_result && $row = mysqli_fetch_assoc($notif_result)) {
+        $unreadNotifications = $row['count'];
+    }
+
+    // Process the JSON data if it's available
+    $jsonData = null;
+    $output = ob_get_contents();
+    if ($output) {
+        ob_clean(); // Clear buffer
+        
+        // Try to extract JSON from the beginning of the output
+        $jsonStart = strpos($output, '{');
+        $jsonEnd = strpos($output, '<!DOCTYPE html>');
+        
+        if ($jsonStart !== false && $jsonEnd !== false) {
+            $jsonString = substr($output, $jsonStart, $jsonEnd - $jsonStart);
+            $jsonData = json_decode($jsonString, true);
+            
+            if ($jsonData) {
+                // Use this data to populate profileData
+                $profileData = array_merge((array)$profileData, $jsonData);
+                
+                // Extract sub-arrays
+                if (isset($jsonData['skills'])) {
+                    $skills = $jsonData['skills'];
+                }
+                
+                if (isset($jsonData['education'])) {
+                    $education = $jsonData['education'];
+                }
+                
+                if (isset($jsonData['experience'])) {
+                    $experience = $jsonData['experience'];
+                }
+                
+                if (isset($jsonData['projects'])) {
+                    $projects = $jsonData['projects'];
+                }
+                
+                if (isset($jsonData['certifications'])) {
+                    $certifications = $jsonData['certifications'];
+                }
+            }
+        }
+    }
+
+    // Make sure we have a profile image (default if not set)
+    if (empty($profileData['profile_image'])) {
+        $profileData['profile_image'] = 'default.jpg';
+    }
+
+    // Handle different request methods
+    $method = $_SERVER['REQUEST_METHOD'];
+
+    switch ($method) {
+        case 'GET':
+            // Get profile data
+            if (isset($_GET['get_skills']) && $_GET['get_skills'] === 'true') {
+                // Get user skills
+                $stmt = $conn->prepare("SELECT id, name, skill_type, proficiency FROM skills WHERE user_id = ?");
+                $stmt->bind_param("i", $user_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                
+                $skills = [];
+                while ($row = $result->fetch_assoc()) {
+                    $skills[] = $row;
+                }
+                
+                $response = $skills;
+            } elseif (isset($_GET['get_education']) && $_GET['get_education'] === 'true') {
+                // Get user education details
+                $stmt = $conn->prepare("SELECT * FROM education WHERE user_id = ? ORDER BY created_at DESC");
+                $stmt->bind_param("i", $user_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                
+                $education = [];
+                while ($row = $result->fetch_assoc()) {
+                    $education[] = $row;
+                }
+                
+                $response = $education;
+            } elseif (isset($_GET['get_experience']) && $_GET['get_experience'] === 'true') {
+                // Get user work experience
+                $stmt = $conn->prepare("SELECT * FROM experience WHERE user_id = ? ORDER BY created_at DESC");
+                $stmt->bind_param("i", $user_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                
+                $experience = [];
+                while ($row = $result->fetch_assoc()) {
+                    $experience[] = $row;
+                }
+                
+                $response = $experience;
+            } elseif (isset($_GET['get_projects']) && $_GET['get_projects'] === 'true') {
+                // Get user projects
+                $stmt = $conn->prepare("SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC");
+                $stmt->bind_param("i", $user_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                
+                $projects = [];
+                while ($row = $result->fetch_assoc()) {
+                    $projects[] = $row;
+                }
+                
+                $response = $projects;
+            } elseif (isset($_GET['get_certifications']) && $_GET['get_certifications'] === 'true') {
+                // Get user certifications
+                $stmt = $conn->prepare("SELECT * FROM certifications WHERE user_id = ? ORDER BY created_at DESC");
+                $stmt->bind_param("i", $user_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                
+                $certifications = [];
+                while ($row = $result->fetch_assoc()) {
+                    $certifications[] = $row;
+                }
+                
+                $response = $certifications;
+            } else {
+                // Get basic profile information
+                $stmt = $conn->prepare("
+                    SELECT u.id, u.email, u.full_name, u.created_at, 
+                           s.reg_number, s.dob, 
+                           s.phone, s.linkedin, s.github, 
+                           s.cgpa
+                    FROM users u
+                    LEFT JOIN students s ON u.id = s.user_id
+                    WHERE u.id = ?
+                ");
+                $stmt->bind_param("i", $user_id);
+                $stmt->execute();
+                $result = $stmt->get_result();
+                
+                if ($result->num_rows > 0) {
+                    $profile = $result->fetch_assoc();
+                    
+                    // Get skills
+                    $skills_stmt = $conn->prepare("SELECT s.id, s.name, s.skill_type 
+                                                  FROM skills s 
+                                                  WHERE s.user_id = ?");
+                    $skills_stmt->bind_param("i", $user_id);
+                    $skills_stmt->execute();
+                    $skills_result = $skills_stmt->get_result();
+                    
+                    $skills = [];
+                    while ($skill = $skills_result->fetch_assoc()) {
+                        $skills[] = $skill;
+                    }
+                    
+                    $profile['skills'] = $skills;
+                    
+                    // Get education
+                    $edu_stmt = $conn->prepare("SELECT * FROM education WHERE user_id = ? ORDER BY created_at DESC");
+                    $edu_stmt->bind_param("i", $user_id);
+                    $edu_stmt->execute();
+                    $edu_result = $edu_stmt->get_result();
+                    
+                    $education = [];
+                    while ($edu = $edu_result->fetch_assoc()) {
+                        $education[] = $edu;
+                    }
+                    
+                    $profile['education'] = $education;
+                    
+                    // Get experience
+                    $exp_stmt = $conn->prepare("SELECT * FROM experience WHERE user_id = ? ORDER BY created_at DESC");
+                    $exp_stmt->bind_param("i", $user_id);
+                    $exp_stmt->execute();
+                    $exp_result = $exp_stmt->get_result();
+                    
+                    $experience = [];
+                    while ($exp = $exp_result->fetch_assoc()) {
+                        $experience[] = $exp;
+                    }
+                    
+                    $profile['experience'] = $experience;
+                    
+                    // Get projects
+                    $proj_stmt = $conn->prepare("SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC");
+                    $proj_stmt->bind_param("i", $user_id);
+                    $proj_stmt->execute();
+                    $proj_result = $proj_stmt->get_result();
+                    
+                    $projects = [];
+                    while ($proj = $proj_result->fetch_assoc()) {
+                        $projects[] = $proj;
+                    }
+                    
+                    $profile['projects'] = $projects;
+                    
+                    // Get certifications
+                    $cert_stmt = $conn->prepare("SELECT * FROM certifications WHERE user_id = ? ORDER BY created_at DESC");
+                    $cert_stmt->bind_param("i", $user_id);
+                    $cert_stmt->execute();
+                    $cert_result = $cert_stmt->get_result();
+                    
+                    $certifications = [];
+                    while ($cert = $cert_result->fetch_assoc()) {
+                        $certifications[] = $cert;
+                    }
+                    
+                    $profile['certifications'] = $certifications;
+                    
+                    $response = $profile;
+                } else {
+                    $response = ['error' => 'Profile not found'];
+                }
+            }
+            break;
+            
+        case 'POST':
+            $data = json_decode(file_get_contents('php://input'), true);
+            
+            if (isset($_POST['update_profile_image']) || isset($_FILES['profile_image'])) {
+                // Handle profile image upload
+                if (isset($_FILES['profile_image']) && $_FILES['profile_image']['error'] == 0) {
+                    $target_dir = "uploads/profile_images/";
+                    
+                    // Create directory if it doesn't exist
+                    if (!file_exists($target_dir)) {
+                        mkdir($target_dir, 0777, true);
+                    }
+                    
+                    $file_extension = pathinfo($_FILES["profile_image"]["name"], PATHINFO_EXTENSION);
+                    $new_filename = $user_id . "_" . time() . "." . $file_extension;
+                    $target_file = $target_dir . $new_filename;
+                    
+                    // Check if it's a valid image file
+                    $allowed_types = ['jpg', 'jpeg', 'png', 'gif'];
+                    if (!in_array(strtolower($file_extension), $allowed_types)) {
+                        $response = ['error' => 'Only JPG, JPEG, PNG & GIF files are allowed'];
+                        break;
+                    }
+                    
+                    if (move_uploaded_file($_FILES["profile_image"]["tmp_name"], $target_file)) {
+                        // Update profile image in database
+                        $stmt = $conn->prepare("UPDATE students SET profile_image = ? WHERE user_id = ?");
+                        $stmt->bind_param("si", $target_file, $user_id);
+                        
+                        if ($stmt->execute()) {
+                            $response = [
+                                'success' => true, 
+                                'message' => 'Profile image updated successfully',
+                                'image_url' => $target_file
+                            ];
+                        } else {
+                            $response = ['error' => 'Failed to update profile image in database: ' . $conn->error];
+                        }
+                    } else {
+                        $response = ['error' => 'Failed to upload image'];
+                    }
+                } else {
+                    $response = ['error' => 'No image file provided or upload error occurred'];
+                }
+            } elseif (isset($data['update_basic_info'])) {
+                // Update basic profile information
+                $first_name = sanitize_input($data['first_name']);
+                $last_name = sanitize_input($data['last_name']);
+                $email = sanitize_input($data['email']);
+                $phone = sanitize_input($data['phone']);
+                $gender = sanitize_input($data['gender']);
+                $date_of_birth = sanitize_input($data['date_of_birth']);
+                $bio = sanitize_input($data['bio']);
+                
+                // First update the users table
+                $user_stmt = $conn->prepare("UPDATE users SET email = ?, full_name = ? WHERE id = ?");
+                $full_name = $first_name . ' ' . $last_name;
+                $user_stmt->bind_param("ssi", $email, $full_name, $user_id);
+                $user_update_success = $user_stmt->execute();
+                
+                // Then update the students table
+                $student_stmt = $conn->prepare("
+                    UPDATE students 
+                    SET first_name = ?, last_name = ?, gender = ?, date_of_birth = ?, 
+                        phone = ?, bio = ? 
+                    WHERE user_id = ?
+                ");
+                $student_stmt->bind_param("ssssssi", $first_name, $last_name, $gender, $date_of_birth, $phone, $bio, $user_id);
+                $student_update_success = $student_stmt->execute();
+                
+                if ($user_update_success && $student_update_success) {
+                    $response = ['success' => true, 'message' => 'Basic information updated successfully'];
+                    // Log the activity
+                    log_activity($user_id, 'Updated profile basic information');
+                } else {
+                    $response = ['error' => 'Failed to update basic information: ' . $conn->error];
+                }
+            } elseif (isset($data['update_contact_info'])) {
+                // Update contact information
+                $address = sanitize_input($data['address']);
+                $city = sanitize_input($data['city']);
+                $state = sanitize_input($data['state']);
+                $country = sanitize_input($data['country']);
+                $postal_code = sanitize_input($data['postal_code']);
+                $linkedin_url = sanitize_input($data['linkedin_url']);
+                $github_url = sanitize_input($data['github_url']);
+                $portfolio_url = sanitize_input($data['portfolio_url']);
+                
+                $stmt = $conn->prepare("
+                    UPDATE students 
+                    SET address = ?, city = ?, state = ?, country = ?, postal_code = ?,
+                        linkedin_url = ?, github_url = ?, portfolio_url = ?
+                    WHERE user_id = ?
+                ");
+                $stmt->bind_param("ssssssssi", $address, $city, $state, $country, $postal_code, 
+                                 $linkedin_url, $github_url, $portfolio_url, $user_id);
+                
+                if ($stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Contact information updated successfully'];
+                    // Log the activity
+                    log_activity($user_id, 'Updated profile contact information');
+                } else {
+                    $response = ['error' => 'Failed to update contact information: ' . $conn->error];
+                }
+            } elseif (isset($data['update_academic_info'])) {
+                // Update academic information
+                $university = sanitize_input($data['university']);
+                $degree = sanitize_input($data['degree']);
+                $department = sanitize_input($data['department']);
+                $enrollment_number = sanitize_input($data['enrollment_number']);
+                $cgpa = floatval($data['cgpa']);
+                $graduation_year = intval($data['graduation_year']);
+                
+                $stmt = $conn->prepare("
+                    UPDATE students 
+                    SET university = ?, degree = ?, department = ?, enrollment_number = ?,
+                        cgpa = ?, graduation_year = ?
+                    WHERE user_id = ?
+                ");
+                $stmt->bind_param("ssssdii", $university, $degree, $department, $enrollment_number, 
+                                 $cgpa, $graduation_year, $user_id);
+                
+                if ($stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Academic information updated successfully'];
+                    // Log the activity
+                    log_activity($user_id, 'Updated profile academic information');
+                } else {
+                    $response = ['error' => 'Failed to update academic information: ' . $conn->error];
+                }
+            } elseif (isset($data['add_skill'])) {
+                // Add a new skill
+                $skill_name = sanitize_input($data['skill_name']);
+                $skill_type = sanitize_input($data['skill_type']);
+                $proficiency = floatval($data['proficiency']);
+                
+                // Check if skill already exists
+                $check_stmt = $conn->prepare("SELECT id FROM skills WHERE user_id = ? AND name = ?");
+                $check_stmt->bind_param("is", $user_id, $skill_name);
+                $check_stmt->execute();
+                $check_result = $check_stmt->get_result();
+                
+                if ($check_result->num_rows > 0) {
+                    // Update existing skill
+                    $skill_id = $check_result->fetch_assoc()['id'];
+                    $update_stmt = $conn->prepare("UPDATE skills SET skill_type = ?, proficiency = ? WHERE id = ?");
+                    $update_stmt->bind_param("sii", $skill_type, $proficiency, $skill_id);
+                    
+                    if ($update_stmt->execute()) {
+                        $response = [
+                            'success' => true, 
+                            'message' => 'Skill updated successfully',
+                            'skill_id' => $skill_id
+                        ];
+                    } else {
+                        $response = ['error' => 'Failed to update skill: ' . $conn->error];
+                    }
+                } else {
+                    // Insert new skill
+                    $insert_stmt = $conn->prepare("INSERT INTO skills (user_id, name, skill_type, proficiency) VALUES (?, ?, ?, ?)");
+                    $insert_stmt->bind_param("issi", $user_id, $skill_name, $skill_type, $proficiency);
+                    
+                    if ($insert_stmt->execute()) {
+                        $skill_id = $conn->insert_id;
+                        $response = [
+                            'success' => true, 
+                            'message' => 'Skill added successfully',
+                            'skill_id' => $skill_id
+                        ];
+                    } else {
+                        $response = ['error' => 'Failed to add skill: ' . $conn->error];
+                    }
+                }
+            } elseif (isset($data['delete_skill'])) {
+                // Delete a skill
+                $skill_id = sanitize_input($data['skill_id']);
+                
+                // Verify the skill belongs to the user
+                $check_stmt = $conn->prepare("SELECT id FROM skills WHERE id = ? AND user_id = ?");
+switch ($method) {
+    case 'GET':
+        // Get profile data
+        if (isset($_GET['get_skills']) && $_GET['get_skills'] === 'true') {
+            // Get user skills
+            $stmt = $conn->prepare("SELECT id, name, skill_type, proficiency FROM skills WHERE user_id = ?");
+            $stmt->bind_param("i", $user_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            $skills = [];
+            while ($row = $result->fetch_assoc()) {
+                $skills[] = $row;
+            }
+            
+            $response = $skills;
+        } elseif (isset($_GET['get_education']) && $_GET['get_education'] === 'true') {
+            // Get user education details
+            $stmt = $conn->prepare("SELECT * FROM education WHERE user_id = ? ORDER BY created_at DESC");
+            $stmt->bind_param("i", $user_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            $education = [];
+            while ($row = $result->fetch_assoc()) {
+                $education[] = $row;
+            }
+            
+            $response = $education;
+        } elseif (isset($_GET['get_experience']) && $_GET['get_experience'] === 'true') {
+            // Get user work experience
+            $stmt = $conn->prepare("SELECT * FROM experience WHERE user_id = ? ORDER BY created_at DESC");
+            $stmt->bind_param("i", $user_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            $experience = [];
+            while ($row = $result->fetch_assoc()) {
+                $experience[] = $row;
+            }
+            
+            $response = $experience;
+        } elseif (isset($_GET['get_projects']) && $_GET['get_projects'] === 'true') {
+            // Get user projects
+            $stmt = $conn->prepare("SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC");
+            $stmt->bind_param("i", $user_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            $projects = [];
+            while ($row = $result->fetch_assoc()) {
+                $projects[] = $row;
+            }
+            
+            $response = $projects;
+        } elseif (isset($_GET['get_certifications']) && $_GET['get_certifications'] === 'true') {
+            // Get user certifications
+            $stmt = $conn->prepare("SELECT * FROM certifications WHERE user_id = ? ORDER BY created_at DESC");
+            $stmt->bind_param("i", $user_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            $certifications = [];
+            while ($row = $result->fetch_assoc()) {
+                $certifications[] = $row;
+            }
+            
+            $response = $certifications;
+        } else {
+            // Get basic profile information
+            $stmt = $conn->prepare("
+                SELECT u.id, u.email, u.full_name, u.created_at, 
+                       s.reg_number, s.dob, 
+                       s.phone, s.linkedin, s.github, 
+                       s.cgpa
+                FROM users u
+                LEFT JOIN students s ON u.id = s.user_id
+                WHERE u.id = ?
+            ");
+            $stmt->bind_param("i", $user_id);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            
+            if ($result->num_rows > 0) {
+                $profile = $result->fetch_assoc();
+                
+                // Get skills
+                $skills_stmt = $conn->prepare("SELECT s.id, s.name, s.skill_type 
+                                              FROM skills s 
+                                              WHERE s.user_id = ?");
+                $skills_stmt->bind_param("i", $user_id);
+                $skills_stmt->execute();
+                $skills_result = $skills_stmt->get_result();
+                
+                $skills = [];
+                while ($skill = $skills_result->fetch_assoc()) {
+                    $skills[] = $skill;
+                }
+                
+                $profile['skills'] = $skills;
+                
+                // Get education
+                $edu_stmt = $conn->prepare("SELECT * FROM education WHERE user_id = ? ORDER BY created_at DESC");
+                $edu_stmt->bind_param("i", $user_id);
+                $edu_stmt->execute();
+                $edu_result = $edu_stmt->get_result();
+                
+                $education = [];
+                while ($edu = $edu_result->fetch_assoc()) {
+                    $education[] = $edu;
+                }
+                
+                $profile['education'] = $education;
+                
+                // Get experience
+                $exp_stmt = $conn->prepare("SELECT * FROM experience WHERE user_id = ? ORDER BY created_at DESC");
+                $exp_stmt->bind_param("i", $user_id);
+                $exp_stmt->execute();
+                $exp_result = $exp_stmt->get_result();
+                
+                $experience = [];
+                while ($exp = $exp_result->fetch_assoc()) {
+                    $experience[] = $exp;
+                }
+                
+                $profile['experience'] = $experience;
+                
+                // Get projects
+                $proj_stmt = $conn->prepare("SELECT * FROM projects WHERE user_id = ? ORDER BY created_at DESC");
+                $proj_stmt->bind_param("i", $user_id);
+                $proj_stmt->execute();
+                $proj_result = $proj_stmt->get_result();
+                
+                $projects = [];
+                while ($proj = $proj_result->fetch_assoc()) {
+                    $projects[] = $proj;
+                }
+                
+                $profile['projects'] = $projects;
+                
+                // Get certifications
+                $cert_stmt = $conn->prepare("SELECT * FROM certifications WHERE user_id = ? ORDER BY created_at DESC");
+                $cert_stmt->bind_param("i", $user_id);
+                $cert_stmt->execute();
+                $cert_result = $cert_stmt->get_result();
+                
+                $certifications = [];
+                while ($cert = $cert_result->fetch_assoc()) {
+                    $certifications[] = $cert;
+                }
+                
+                $profile['certifications'] = $certifications;
+                
+                $response = $profile;
+            } else {
+                $response = ['error' => 'Profile not found'];
+            }
+        }
+        break;
+        
+    case 'POST':
+        $data = json_decode(file_get_contents('php://input'), true);
+        
+        if (isset($_POST['update_profile_image']) || isset($_FILES['profile_image'])) {
+            // Handle profile image upload
+            if (isset($_FILES['profile_image']) && $_FILES['profile_image']['error'] == 0) {
+                $target_dir = "uploads/profile_images/";
+                
+                // Create directory if it doesn't exist
+                if (!file_exists($target_dir)) {
+                    mkdir($target_dir, 0777, true);
+                }
+                
+                $file_extension = pathinfo($_FILES["profile_image"]["name"], PATHINFO_EXTENSION);
+                $new_filename = $user_id . "_" . time() . "." . $file_extension;
+                $target_file = $target_dir . $new_filename;
+                
+                // Check if it's a valid image file
+                $allowed_types = ['jpg', 'jpeg', 'png', 'gif'];
+                if (!in_array(strtolower($file_extension), $allowed_types)) {
+                    $response = ['error' => 'Only JPG, JPEG, PNG & GIF files are allowed'];
+                    break;
+                }
+                
+                if (move_uploaded_file($_FILES["profile_image"]["tmp_name"], $target_file)) {
+                    // Update profile image in database
+                    $stmt = $conn->prepare("UPDATE students SET profile_image = ? WHERE user_id = ?");
+                    $stmt->bind_param("si", $target_file, $user_id);
+                    
+                    if ($stmt->execute()) {
+                        $response = [
+                            'success' => true, 
+                            'message' => 'Profile image updated successfully',
+                            'image_url' => $target_file
+                        ];
+                    } else {
+                        $response = ['error' => 'Failed to update profile image in database: ' . $conn->error];
+                    }
+                } else {
+                    $response = ['error' => 'Failed to upload image'];
+                }
+            } else {
+                $response = ['error' => 'No image file provided or upload error occurred'];
+            }
+        } elseif (isset($data['update_basic_info'])) {
+            // Update basic profile information
+            $first_name = sanitize_input($data['first_name']);
+            $last_name = sanitize_input($data['last_name']);
+            $email = sanitize_input($data['email']);
+            $phone = sanitize_input($data['phone']);
+            $gender = sanitize_input($data['gender']);
+            $date_of_birth = sanitize_input($data['date_of_birth']);
+            $bio = sanitize_input($data['bio']);
+            
+            // First update the users table
+            $user_stmt = $conn->prepare("UPDATE users SET email = ?, full_name = ? WHERE id = ?");
+            $full_name = $first_name . ' ' . $last_name;
+            $user_stmt->bind_param("ssi", $email, $full_name, $user_id);
+            $user_update_success = $user_stmt->execute();
+            
+            // Then update the students table
+            $student_stmt = $conn->prepare("
+                UPDATE students 
+                SET first_name = ?, last_name = ?, gender = ?, date_of_birth = ?, 
+                    phone = ?, bio = ? 
+                WHERE user_id = ?
+            ");
+            $student_stmt->bind_param("ssssssi", $first_name, $last_name, $gender, $date_of_birth, $phone, $bio, $user_id);
+            $student_update_success = $student_stmt->execute();
+            
+            if ($user_update_success && $student_update_success) {
+                $response = ['success' => true, 'message' => 'Basic information updated successfully'];
+                // Log the activity
+                log_activity($user_id, 'Updated profile basic information');
+            } else {
+                $response = ['error' => 'Failed to update basic information: ' . $conn->error];
+            }
+        } elseif (isset($data['update_contact_info'])) {
+            // Update contact information
+            $address = sanitize_input($data['address']);
+            $city = sanitize_input($data['city']);
+            $state = sanitize_input($data['state']);
+            $country = sanitize_input($data['country']);
+            $postal_code = sanitize_input($data['postal_code']);
+            $linkedin_url = sanitize_input($data['linkedin_url']);
+            $github_url = sanitize_input($data['github_url']);
+            $portfolio_url = sanitize_input($data['portfolio_url']);
+            
+            $stmt = $conn->prepare("
+                UPDATE students 
+                SET address = ?, city = ?, state = ?, country = ?, postal_code = ?,
+                    linkedin_url = ?, github_url = ?, portfolio_url = ?
+                WHERE user_id = ?
+            ");
+            $stmt->bind_param("ssssssssi", $address, $city, $state, $country, $postal_code, 
+                             $linkedin_url, $github_url, $portfolio_url, $user_id);
+            
+            if ($stmt->execute()) {
+                $response = ['success' => true, 'message' => 'Contact information updated successfully'];
+                // Log the activity
+                log_activity($user_id, 'Updated profile contact information');
+            } else {
+                $response = ['error' => 'Failed to update contact information: ' . $conn->error];
+            }
+        } elseif (isset($data['update_academic_info'])) {
+            // Update academic information
+            $university = sanitize_input($data['university']);
+            $degree = sanitize_input($data['degree']);
+            $department = sanitize_input($data['department']);
+            $enrollment_number = sanitize_input($data['enrollment_number']);
+            $cgpa = floatval($data['cgpa']);
+            $graduation_year = intval($data['graduation_year']);
+            
+            $stmt = $conn->prepare("
+                UPDATE students 
+                SET university = ?, degree = ?, department = ?, enrollment_number = ?,
+                    cgpa = ?, graduation_year = ?
+                WHERE user_id = ?
+            ");
+            $stmt->bind_param("ssssdii", $university, $degree, $department, $enrollment_number, 
+                             $cgpa, $graduation_year, $user_id);
+            
+            if ($stmt->execute()) {
+                $response = ['success' => true, 'message' => 'Academic information updated successfully'];
+                // Log the activity
+                log_activity($user_id, 'Updated profile academic information');
+            } else {
+                $response = ['error' => 'Failed to update academic information: ' . $conn->error];
+            }
+        } elseif (isset($data['add_skill'])) {
+            // Add a new skill
+            $skill_name = sanitize_input($data['skill_name']);
+            $skill_type = sanitize_input($data['skill_type']);
+            $proficiency = floatval($data['proficiency']);
+            
+            // Check if skill already exists
+            $check_stmt = $conn->prepare("SELECT id FROM skills WHERE user_id = ? AND name = ?");
+            $check_stmt->bind_param("is", $user_id, $skill_name);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                // Update existing skill
+                $skill_id = $check_result->fetch_assoc()['id'];
+                $update_stmt = $conn->prepare("UPDATE skills SET skill_type = ?, proficiency = ? WHERE id = ?");
+                $update_stmt->bind_param("sii", $skill_type, $proficiency, $skill_id);
+                
+                if ($update_stmt->execute()) {
+                    $response = [
+                        'success' => true, 
+                        'message' => 'Skill updated successfully',
+                        'skill_id' => $skill_id
+                    ];
+                } else {
+                    $response = ['error' => 'Failed to update skill: ' . $conn->error];
+                }
+            } else {
+                // Insert new skill
+                $insert_stmt = $conn->prepare("INSERT INTO skills (user_id, name, skill_type, proficiency) VALUES (?, ?, ?, ?)");
+                $insert_stmt->bind_param("issi", $user_id, $skill_name, $skill_type, $proficiency);
+                
+                if ($insert_stmt->execute()) {
+                    $skill_id = $conn->insert_id;
+                    $response = [
+                        'success' => true, 
+                        'message' => 'Skill added successfully',
+                        'skill_id' => $skill_id
+                    ];
+                } else {
+                    $response = ['error' => 'Failed to add skill: ' . $conn->error];
+                }
+            }
+        } elseif (isset($data['delete_skill'])) {
+            // Delete a skill
+            $skill_id = sanitize_input($data['skill_id']);
+            
+            // Verify the skill belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM skills WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $skill_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $delete_stmt = $conn->prepare("DELETE FROM skills WHERE id = ?");
+                $delete_stmt->bind_param("i", $skill_id);
+                
+                if ($delete_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Skill deleted successfully'];
+                } else {
+                    $response = ['error' => 'Failed to delete skill: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Skill not found or you do not have permission to delete it'];
+            }
+        } elseif (isset($data['add_education'])) {
+            // Add education details
+            $institution = sanitize_input($data['institution']);
+            $degree = sanitize_input($data['degree']);
+            $field_of_study = sanitize_input($data['field_of_study']);
+            $start_date = sanitize_input($data['start_date']);
+            $end_date = sanitize_input($data['end_date']);
+            $grade = sanitize_input($data['grade']);
+            $description = sanitize_input($data['description']);
+            
+            $stmt = $conn->prepare("
+                INSERT INTO education 
+                (user_id, institution, degree, field_of_study, start_date, end_date, grade, description) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt->bind_param("isssssss", $user_id, $institution, $degree, $field_of_study, 
+                             $start_date, $end_date, $grade, $description);
+            
+            if ($stmt->execute()) {
+                $education_id = $conn->insert_id;
+                $response = [
+                    'success' => true, 
+                    'message' => 'Education details added successfully',
+                    'education_id' => $education_id
+                ];
+            } else {
+                $response = ['error' => 'Failed to add education details: ' . $conn->error];
+            }
+        } elseif (isset($data['update_education'])) {
+            // Update education details
+            $education_id = sanitize_input($data['education_id']);
+            $institution = sanitize_input($data['institution']);
+            $degree = sanitize_input($data['degree']);
+            $field_of_study = sanitize_input($data['field_of_study']);
+            $start_date = sanitize_input($data['start_date']);
+            $end_date = sanitize_input($data['end_date']);
+            $grade = sanitize_input($data['grade']);
+            $description = sanitize_input($data['description']);
+            
+            // Verify the education record belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM education WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $education_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $update_stmt = $conn->prepare("
+                    UPDATE education 
+                    SET institution = ?, degree = ?, field_of_study = ?, start_date = ?, 
+                        end_date = ?, grade = ?, description = ? 
+                    WHERE id = ?
+                ");
+                $update_stmt->bind_param("sssssssi", $institution, $degree, $field_of_study, 
+                                       $start_date, $end_date, $grade, $description, $education_id);
+                
+                if ($update_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Education details updated successfully'];
+                } else {
+                    $response = ['error' => 'Failed to update education details: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Education record not found or you do not have permission to update it'];
+            }
+        } elseif (isset($data['delete_education'])) {
+            // Delete education record
+            $education_id = sanitize_input($data['education_id']);
+            
+            // Verify the education record belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM education WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $education_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $delete_stmt = $conn->prepare("DELETE FROM education WHERE id = ?");
+                $delete_stmt->bind_param("i", $education_id);
+                
+                if ($delete_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Education record deleted successfully'];
+                } else {
+                    $response = ['error' => 'Failed to delete education record: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Education record not found or you do not have permission to delete it'];
+            }
+        } elseif (isset($data['add_experience'])) {
+            // Add work experience
+            $company = sanitize_input($data['company']);
+            $position = sanitize_input($data['position']);
+            $location = sanitize_input($data['location']);
+            $start_date = sanitize_input($data['start_date']);
+            $end_date = sanitize_input($data['end_date']);
+            $is_current = isset($data['is_current']) ? $data['is_current'] : 0;
+            $description = sanitize_input($data['description']);
+            
+            $stmt = $conn->prepare("
+                INSERT INTO experience 
+                (user_id, company, position, location, start_date, end_date, is_current, description) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt->bind_param("isssssis", $user_id, $company, $position, $location, 
+                             $start_date, $end_date, $is_current, $description);
+            
+            if ($stmt->execute()) {
+                $experience_id = $conn->insert_id;
+                $response = [
+                    'success' => true, 
+                    'message' => 'Work experience added successfully',
+                    'experience_id' => $experience_id
+                ];
+            } else {
+                $response = ['error' => 'Failed to add work experience: ' . $conn->error];
+            }
+        } elseif (isset($data['update_experience'])) {
+            // Update work experience
+            $experience_id = sanitize_input($data['experience_id']);
+            $company = sanitize_input($data['company']);
+            $position = sanitize_input($data['position']);
+            $location = sanitize_input($data['location']);
+            $start_date = sanitize_input($data['start_date']);
+            $end_date = sanitize_input($data['end_date']);
+            $is_current = isset($data['is_current']) ? $data['is_current'] : 0;
+            $description = sanitize_input($data['description']);
+            
+            // Verify the experience record belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM experience WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $experience_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $update_stmt = $conn->prepare("
+                    UPDATE experience 
+                    SET company = ?, position = ?, location = ?, start_date = ?, 
+                        end_date = ?, is_current = ?, description = ? 
+                    WHERE id = ?
+                ");
+                $update_stmt->bind_param("sssssisi", $company, $position, $location, 
+                                       $start_date, $end_date, $is_current, $description, $experience_id);
+                
+                if ($update_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Work experience updated successfully'];
+                } else {
+                    $response = ['error' => 'Failed to update work experience: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Experience record not found or you do not have permission to update it'];
+            }
+        } elseif (isset($data['delete_experience'])) {
+            // Delete work experience
+            $experience_id = sanitize_input($data['experience_id']);
+            
+            // Verify the experience record belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM experience WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $experience_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $delete_stmt = $conn->prepare("DELETE FROM experience WHERE id = ?");
+                $delete_stmt->bind_param("i", $experience_id);
+                
+                if ($delete_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Work experience deleted successfully'];
+                } else {
+                    $response = ['error' => 'Failed to delete work experience: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Experience record not found or you do not have permission to delete it'];
+            }
+        } elseif (isset($data['add_project'])) {
+            // Add project
+            $title = sanitize_input($data['title']);
+            $description = sanitize_input($data['description']);
+            $start_date = sanitize_input($data['start_date']);
+            $completion_date = sanitize_input($data['completion_date']);
+            $project_url = sanitize_input($data['project_url']);
+            $technologies = sanitize_input($data['technologies']);
+            
+            $stmt = $conn->prepare("
+                INSERT INTO projects 
+                (user_id, title, description, start_date, completion_date, project_url, technologies) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt->bind_param("issssss", $user_id, $title, $description, $start_date, 
+                             $completion_date, $project_url, $technologies);
+            
+            if ($stmt->execute()) {
+                $project_id = $conn->insert_id;
+                $response = [
+                    'success' => true, 
+                    'message' => 'Project added successfully',
+                    'project_id' => $project_id
+                ];
+            } else {
+                $response = ['error' => 'Failed to add project: ' . $conn->error];
+            }
+        } elseif (isset($data['update_project'])) {
+            // Update project
+            $project_id = sanitize_input($data['project_id']);
+            $title = sanitize_input($data['title']);
+            $description = sanitize_input($data['description']);
+            $start_date = sanitize_input($data['start_date']);
+            $completion_date = sanitize_input($data['completion_date']);
+            $project_url = sanitize_input($data['project_url']);
+            $technologies = sanitize_input($data['technologies']);
+            
+            // Verify the project belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM projects WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $project_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $update_stmt = $conn->prepare("
+                    UPDATE projects 
+                    SET title = ?, description = ?, start_date = ?, completion_date = ?, 
+                        project_url = ?, technologies = ? 
+                    WHERE id = ?
+                ");
+                $update_stmt->bind_param("ssssssi", $title, $description, $start_date, 
+                                       $completion_date, $project_url, $technologies, $project_id);
+                
+                if ($update_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Project updated successfully'];
+                } else {
+                    $response = ['error' => 'Failed to update project: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Project not found or you do not have permission to update it'];
+            }
+        } elseif (isset($data['delete_project'])) {
+            // Delete project
+            $project_id = sanitize_input($data['project_id']);
+            
+            // Verify the project belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM projects WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $project_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $delete_stmt = $conn->prepare("DELETE FROM projects WHERE id = ?");
+                $delete_stmt->bind_param("i", $project_id);
+                
+                if ($delete_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Project deleted successfully'];
+                } else {
+                    $response = ['error' => 'Failed to delete project: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Project not found or you do not have permission to delete it'];
+            }
+        } elseif (isset($data['add_certification'])) {
+            // Add certification
+            $name = sanitize_input($data['name']);
+            $issuing_organization = sanitize_input($data['issuing_organization']);
+            $issue_date = sanitize_input($data['issue_date']);
+            $expiry_date = isset($data['expiry_date']) ? sanitize_input($data['expiry_date']) : null;
+            $credential_id = sanitize_input($data['credential_id']);
+            $credential_url = sanitize_input($data['credential_url']);
+            
+            $stmt = $conn->prepare("
+                INSERT INTO certifications 
+                (user_id, name, issuing_organization, issue_date, expiry_date, credential_id, credential_url) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt->bind_param("issssss", $user_id, $name, $issuing_organization, $issue_date, 
+                             $expiry_date, $credential_id, $credential_url);
+            
+            if ($stmt->execute()) {
+                $certification_id = $conn->insert_id;
+                $response = [
+                    'success' => true, 
+                    'message' => 'Certification added successfully',
+                    'certification_id' => $certification_id
+                ];
+            } else {
+                $response = ['error' => 'Failed to add certification: ' . $conn->error];
+            }
+        } elseif (isset($data['update_certification'])) {
+            // Update certification
+            $certification_id = sanitize_input($data['certification_id']);
+            $name = sanitize_input($data['name']);
+            $issuing_organization = sanitize_input($data['issuing_organization']);
+            $issue_date = sanitize_input($data['issue_date']);
+            $expiry_date = isset($data['expiry_date']) ? sanitize_input($data['expiry_date']) : null;
+            $credential_id = sanitize_input($data['credential_id']);
+            $credential_url = sanitize_input($data['credential_url']);
+            
+            // Verify the certification belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM certifications WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $certification_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $update_stmt = $conn->prepare("
+                    UPDATE certifications 
+                    SET name = ?, issuing_organization = ?, issue_date = ?, expiry_date = ?, 
+                        credential_id = ?, credential_url = ? 
+                    WHERE id = ?
+                ");
+                $update_stmt->bind_param("ssssssi", $name, $issuing_organization, $issue_date, 
+                                       $expiry_date, $credential_id, $credential_url, $certification_id);
+                
+                if ($update_stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Certification updated successfully'];
+                } else {
+                    $response = ['error' => 'Failed to update certification: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Certification not found or you do not have permission to update it'];
+            }
+        } elseif (isset($data['delete_certification'])) {
+            // Delete certification
+            $certification_id = sanitize_input($data['certification_id']);
+            
+            // Verify the certification belongs to the user
+            $check_stmt = $conn->prepare("SELECT id FROM certifications WHERE id = ? AND user_id = ?");
+            $check_stmt->bind_param("ii", $certification_id, $user_id);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            
+            if ($check_result->num_rows > 0) {
+                $stmt = $conn->prepare("DELETE FROM certifications WHERE id = ?");
+                $stmt->bind_param("i", $certification_id);
+                
+                if ($stmt->execute()) {
+                    $response = ['success' => true, 'message' => 'Certification deleted successfully'];
+                    // Log the activity
+                    log_activity($user_id, 'Deleted certification');
+                } else {
+                    $response = ['error' => 'Failed to delete certification: ' . $conn->error];
+                }
+            } else {
+                $response = ['error' => 'Certification not found or you do not have permission to delete it'];
+            }
+        } elseif (isset($data['upload_resume'])) {
+            // Upload resume
+            if (isset($_FILES['resume']) && $_FILES['resume']['error'] == 0) {
+                $target_dir = "uploads/resumes/";
+                
+                // Create directory if it doesn't exist
+                if (!file_exists($target_dir)) {
+                    mkdir($target_dir, 0777, true);
+                }
+                
+                $file_extension = pathinfo($_FILES["resume"]["name"], PATHINFO_EXTENSION);
+                $new_filename = $user_id . "_" . time() . "." . $file_extension;
+                $target_file = $target_dir . $new_filename;
+                
+                // Check file size (5MB max)
+                if ($_FILES["resume"]["size"] > 5000000) {
+                    $response = ['error' => 'Sorry, your file is too large. Maximum size is 5MB.'];
+                    break;
+                }
+                
+                // Allow certain file formats
+                $allowed_types = ['pdf', 'doc', 'docx'];
+                if (!in_array(strtolower($file_extension), $allowed_types)) {
+                    $response = ['error' => 'Sorry, only PDF, DOC & DOCX files are allowed.'];
+                    break;
+                }
+                
+                if (move_uploaded_file($_FILES["resume"]["tmp_name"], $target_file)) {
+                    // Update resume URL in database
+                    $stmt = $conn->prepare("UPDATE students SET resume_url = ? WHERE user_id = ?");
+                    $stmt->bind_param("si", $target_file, $user_id);
+                    
+                    if ($stmt->execute()) {
+                        $response = [
+                            'success' => true, 
+                            'message' => 'Resume uploaded successfully',
+                            'resume_url' => $target_file
+                        ];
+                        // Log the activity
+                        log_activity($user_id, 'Uploaded resume');
+                    } else {
+                        $response = ['error' => 'Failed to update resume in database: ' . $conn->error];
+                    }
+                } else {
+                    $response = ['error' => 'Failed to upload resume'];
+                }
+            }
+        } else {
+            $response = ['error' => 'Invalid request'];
+        }
+        break;
+        
+    default:
+        $response = ['error' => 'Invalid request method'];
+        break;
+}
+
+// Return JSON response
+header('Content-Type: application/json');
+echo json_encode($response);
+
+// DON'T close the connection here
+// $conn->close();
+
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Profile | Campus Recruitment System</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .profile-header {
+            background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%);
+            color: white;
+            padding: 2rem 0;
+            border-radius: 0.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .profile-image {
+            width: 150px;
+            height: 150px;
+            object-fit: cover;
+            border-radius: 50%;
+            border: 5px solid rgba(255,255,255,0.3);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        
+        .profile-card {
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-radius: 0.5rem;
+            margin-bottom: 1.5rem;
+            overflow: hidden;
+            transition: transform 0.3s;
+        }
+        
+        .profile-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .profile-card-header {
+            background-color: #f8f9fa;
+            padding: 0.75rem 1.25rem;
+            border-bottom: 1px solid rgba(0,0,0,0.125);
+            font-weight: 600;
+        }
+        
+        .notification-badge {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .badge-count {
+            position: absolute;
+            top: -10px;
+            right: -10px;
+            background-color: #dc3545;
+            color: white;
+            border-radius: 50%;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.75rem;
+        }
+        
+        .skills-badge {
+            background-color: #e9ecef;
+            color: #495057;
+            border-radius: 50px;
+            padding: 0.4rem 0.8rem;
+            margin: 0.2rem;
+            display: inline-block;
+            font-size: 0.85rem;
+        }
+        
+        .tab-content {
+            padding-top: 1.5rem;
+        }
+        
+        .application-status-pending {
+            color: #ffc107;
+            font-weight: 600;
+        }
+        
+        .application-status-approved {
+            color: #28a745;
+            font-weight: 600;
+        }
+        
+        .application-status-rejected {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
+        .btn-rounded {
+            border-radius: 50px;
+            padding: 0.375rem 1.5rem;
+        }
+    </style>
+</head>
+<body>
+    <?php @include 'navbar.php'; ?>
+
+    <div class="container py-5">
+        <?php if(!empty($profileData)): ?>
+            <!-- Profile Header -->
+            <div class="profile-header text-center text-md-start mb-4">
+                <div class="row align-items-center">
+                    <div class="col-md-3 text-center">
+                        <img src="uploads/<?php echo htmlspecialchars($profileData['profile_image'] ?? 'default.jpg'); ?>" alt="Profile Image" class="profile-image mb-3">
+                    </div>
+                    <div class="col-md-9">
+                        <h1 class="display-5 fw-bold"><?php echo htmlspecialchars($profileData['full_name'] ?? 'User'); ?></h1>
+                        <p class="lead mb-1"><i class="fas fa-user-graduate me-2"></i><?php echo htmlspecialchars($profileData['department'] ?? $profileData['branch'] ?? 'Not specified'); ?></p>
+                        <p class="lead mb-1"><i class="fas fa-envelope me-2"></i><?php echo htmlspecialchars($profileData['email'] ?? ''); ?></p>
+                        <?php if(!empty($profileData['cgpa'])): ?>
+                            <p class="lead mb-1"><i class="fas fa-star me-2"></i>CGPA: <?php echo htmlspecialchars($profileData['cgpa']); ?></p>
+                        <?php endif; ?>
+                        <div class="mt-3">
+                            <button class="btn btn-light btn-rounded me-2" data-bs-toggle="modal" data-bs-target="#editProfileModal">
+                                <i class="fas fa-edit me-2"></i>Edit Profile
+                            </button>
+                            <button class="btn btn-light btn-rounded" data-bs-toggle="modal" data-bs-target="#uploadProfileImageModal">
+                                <i class="fas fa-camera me-2"></i>Change Photo
+                            </button>
+                            <button class="btn btn-outline-danger btn-rounded mt-2" data-bs-toggle="modal" data-bs-target="#deleteAccountModal">
+                                <i class="fas fa-trash me-2"></i>Delete Account
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Profile Tabs -->
+            <ul class="nav nav-tabs mb-4" id="profileTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="skills-tab" data-bs-toggle="tab" data-bs-target="#skills" type="button" role="tab" aria-controls="skills" aria-selected="true">
+                        <i class="fas fa-code me-2"></i>Skills
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="applications-tab" data-bs-toggle="tab" data-bs-target="#applications" type="button" role="tab" aria-controls="applications" aria-selected="false">
+                        <i class="fas fa-briefcase me-2"></i>Applications
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="projects-tab" data-bs-toggle="tab" data-bs-target="#projects" type="button" role="tab" aria-controls="projects" aria-selected="false">
+                        <i class="fas fa-project-diagram me-2"></i>Projects
+                    </button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="education-tab" data-bs-toggle="tab" data-bs-target="#education" type="button" role="tab" aria-controls="education" aria-selected="false">
+                        <i class="fas fa-graduation-cap me-2"></i>Education
+                    </button>
+                </li>
+                <li class="nav-item ms-auto" role="presentation">
+                    <button class="nav-link position-relative" id="notifications-tab" data-bs-toggle="tab" data-bs-target="#notifications" type="button" role="tab" aria-controls="notifications" aria-selected="false">
+                        <i class="fas fa-bell me-2"></i>Notifications
+                        <?php if($unreadNotifications > 0): ?>
+                            <span class="badge bg-danger rounded-pill"><?php echo $unreadNotifications; ?></span>
+                        <?php endif; ?>
+                    </button>
+                </li>
+            </ul>
+
+            <div class="tab-content" id="profileTabsContent">
+                <!-- Skills Tab -->
+                <div class="tab-pane fade show active" id="skills" role="tabpanel" aria-labelledby="skills-tab">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="profile-card">
+                                <div class="profile-card-header d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0"><i class="fas fa-code me-2"></i>My Skills</h5>
+                                    <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addSkillModal">
+                                        <i class="fas fa-plus me-1"></i> Add Skill
+                                    </button>
+                                </div>
+                                <div class="card-body">
+                                    <?php if(count($skills) > 0): ?>
+                                        <div class="d-flex flex-wrap">
+                                            <?php foreach($skills as $skill): ?>
+                                                <div class="skills-badge d-flex align-items-center">
+                                                    <?php echo escape_output($skill['name']); ?>
+                                                    <button class="btn btn-sm text-danger border-0 ms-2 p-0" 
+                                                           onclick="removeSkill(<?php echo $skill['id']; ?>)">
+                                                        <i class="fas fa-times-circle"></i>
+                                                    </button>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php else: ?>
+                                        <p class="text-muted">No skills added yet. Click "Add Skill" to add your skills.</p>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                            
+                            <div class="profile-card">
+                                <div class="profile-card-header">
+                                    <h5 class="mb-0"><i class="fas fa-trophy me-2"></i>Recommended Skills</h5>
+                                </div>
+                                <div class="card-body">
+                                    <?php if(count($recommendedSkills) > 0): ?>
+                                        <div class="d-flex flex-wrap">
+                                            <?php foreach($recommendedSkills as $skill): ?>
+                                                <span class="skills-badge"><?php echo escape_output($skill['name']); ?></span>
+                                            <?php endforeach; ?>
+                                        </div>
+                                        <div class="mt-3">
+                                            <small class="text-muted">These skills are frequently requested in job postings.</small>
+                                        </div>
+                                    <?php else: ?>
+                                        <p class="text-muted">No recommended skills available.</p>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-4">
+                            <div class="profile-card">
+                                <div class="profile-card-header">
+                                    <h5 class="mb-0"><i class="fas fa-lightbulb me-2"></i>Skill Tips</h5>
+                                </div>
+                                <div class="card-body">
+                                    <ul class="list-group list-group-flush">
+                                        <li class="list-group-item"><i class="fas fa-check-circle text-success me-2"></i>Add at least 5 technical skills</li>
+                                        <li class="list-group-item"><i class="fas fa-check-circle text-success me-2"></i>Include both hard and soft skills</li>
+                                        <li class="list-group-item"><i class="fas fa-check-circle text-success me-2"></i>Add skills relevant to your career goals</li>
+                                        <li class="list-group-item"><i class="fas fa-check-circle text-success me-2"></i>Focus on in-demand technologies</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Applications Tab -->
+                <div class="tab-pane fade" id="applications" role="tabpanel" aria-labelledby="applications-tab">
+                    <div class="profile-card">
+                        <div class="profile-card-header">
+                            <h5 class="mb-0"><i class="fas fa-briefcase me-2"></i>My Applications</h5>
+                        </div>
+                        <div class="card-body">
+                            <?php if(count($applications) > 0): ?>
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Job Title</th>
+                                                <th>Company</th>
+                                                <th>Applied On</th>
+                                                <th>Status</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <?php foreach($applications as $app): ?>
+                                                <tr>
+                                                    <td><?php echo escape_output($app['job_title'] ?? 'Unknown Job'); ?></td>
+                                                    <td><?php echo escape_output($app['company_name'] ?? 'Unknown Company'); ?></td>
+                                                    <td><?php echo isset($app['applied_date']) ? format_date($app['applied_date']) : 'Unknown Date'; ?></td>
+                                                    <td>
+                                                        <?php if(isset($app['status']) && $app['status'] == 'pending'): ?>
+                                                            <span class="application-status-pending">
+                                                                <i class="fas fa-clock me-1"></i>Pending
+                                                            </span>
+                                                        <?php elseif(isset($app['status']) && $app['status'] == 'approved'): ?>
+                                                            <span class="application-status-approved">
+                                                                <i class="fas fa-check-circle me-1"></i>Approved
+                                                            </span>
+                                                        <?php elseif(isset($app['status']) && $app['status'] == 'rejected'): ?>
+                                                            <span class="application-status-rejected">
+                                                                <i class="fas fa-times-circle me-1"></i>Rejected
+                                                            </span>
+                                                        <?php else: ?>
+                                                            <span class="text-secondary">
+                                                                <i class="fas fa-question-circle me-1"></i>Unknown
+                                                            </span>
+                                                        <?php endif; ?>
+                                                    </td>
+                                                    <td>
+                                                        <a href="job_details.php?id=<?php echo $app['job_id'] ?? '#'; ?>" class="btn btn-sm btn-outline-primary">
+                                                            <i class="fas fa-eye me-1"></i>View
+                                                        </a>
+                                                    </td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            <?php else: ?>
+                                <div class="text-center py-4">
+                                    <i class="fas fa-briefcase fa-3x text-muted mb-3"></i>
+                                    <p class="lead">You haven't applied to any jobs yet.</p>
+                                    <a href="jobs.php" class="btn btn-primary">Browse Jobs</a>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Projects Tab -->
+                <div class="tab-pane fade" id="projects" role="tabpanel" aria-labelledby="projects-tab">
+                    <div class="profile-card">
+                        <div class="profile-card-header">
+                            <h5 class="mb-0"><i class="fas fa-project-diagram me-2"></i>Projects</h5>
+                        </div>
+                        <div class="card-body">
+                            <?php if(count($projects) > 0): ?>
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Title</th>
+                                                <th>Description</th>
+                                                <th>Start Date</th>
+                                                <th>Completion Date</th>
+                                                <th>Project URL</th>
+                                                <th>Technologies</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <?php foreach($projects as $project): ?>
+                                                <tr>
+                                                    <td><?php echo escape_output($project['title']); ?></td>
+                                                    <td><?php echo escape_output($project['description']); ?></td>
+                                                    <td><?php echo isset($project['start_date']) ? format_date($project['start_date']) : 'Unknown Date'; ?></td>
+                                                    <td><?php echo isset($project['completion_date']) ? format_date($project['completion_date']) : 'Unknown Date'; ?></td>
+                                                    <td><?php echo escape_output($project['project_url']); ?></td>
+                                                    <td><?php echo escape_output($project['technologies']); ?></td>
+                                                    <td>
+                                                        <a href="project_details.php?id=<?php echo $project['id'] ?? '#'; ?>" class="btn btn-sm btn-outline-primary">
+                                                            <i class="fas fa-eye me-1"></i>View
+                                                        </a>
+                                                    </td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            <?php else: ?>
+                                <div class="text-center py-4">
+                                    <i class="fas fa-project-diagram fa-3x text-muted mb-3"></i>
+                                    <p class="lead">No projects added yet.</p>
+                                    <a href="add_project.php" class="btn btn-primary">Add Project</a>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Education Tab -->
+                <div class="tab-pane fade" id="education" role="tabpanel" aria-labelledby="education-tab">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="profile-card">
+                                <div class="profile-card-header d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0"><i class="fas fa-graduation-cap me-2"></i>Education History</h5>
+                                    <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addEducationModal">
+                                        <i class="fas fa-plus me-1"></i> Add Education
+                                    </button>
+                                </div>
+                                <div class="card-body">
+                                    <?php if(count($education) > 0): ?>
+                                        <div class="timeline">
+                                            <?php foreach($education as $edu): ?>
+                                                <div class="card mb-3">
+                                                    <div class="card-body">
+                                                        <div class="d-flex justify-content-between align-items-center">
+                                                            <h5 class="card-title mb-1"><?php echo escape_output($edu['degree']); ?></h5>
+                                                            <div>
+                                                                <button class="btn btn-sm btn-outline-primary me-1" onclick="editEducation(<?php echo $edu['id']; ?>)">
+                                                                    <i class="fas fa-edit"></i>
+                                                                </button>
+                                                                <button class="btn btn-sm btn-outline-danger" onclick="deleteEducation(<?php echo $edu['id']; ?>)">
+                                                                    <i class="fas fa-trash"></i>
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        <h6 class="card-subtitle mb-2 text-muted"><?php echo escape_output($edu['institution']); ?></h6>
+                                                        <p class="card-text mb-1">
+                                                            <i class="fas fa-calendar me-2"></i>
+                                                            <?php echo escape_output($edu['start_year']); ?> - 
+                                                            <?php echo !empty($edu['end_year']) ? escape_output($edu['end_year']) : 'Present'; ?>
+                                                        </p>
+                                                        <?php if(!empty($edu['grade'])): ?>
+                                                            <p class="card-text mb-1">
+                                                                <i class="fas fa-star me-2"></i>
+                                                                Grade: <?php echo escape_output($edu['grade']); ?>
+                                                            </p>
+                                                        <?php endif; ?>
+                                                        <?php if(!empty($edu['description'])): ?>
+                                                            <p class="card-text mt-2"><?php echo escape_output($edu['description']); ?></p>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php else: ?>
+                                        <div class="text-center py-4">
+                                            <i class="fas fa-graduation-cap fa-3x text-muted mb-3"></i>
+                                            <p class="lead">No education details added yet.</p>
+                                            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addEducationModal">
+                                                Add Education
+                                            </button>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                            
+                            <!-- Certifications -->
+                            <div class="profile-card mt-4">
+                                <div class="profile-card-header d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0"><i class="fas fa-certificate me-2"></i>Certifications</h5>
+                                    <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addCertificationModal">
+                                        <i class="fas fa-plus me-1"></i> Add Certification
+                                    </button>
+                                </div>
+                                <div class="card-body">
+                                    <?php if(count($certifications) > 0): ?>
+                                        <div class="list-group">
+                                            <?php foreach($certifications as $cert): ?>
+                                                <div class="list-group-item list-group-item-action">
+                                                    <div class="d-flex justify-content-between align-items-center">
+                                                        <h5 class="mb-1"><?php echo escape_output($cert['name'] ?? ''); ?></h5>
+                                                        <div>
+                                                            <button class="btn btn-sm btn-outline-primary me-1" onclick="editCertification(<?php echo $cert['id']; ?>)">
+                                                                <i class="fas fa-edit"></i>
+                                                            </button>
+                                                            <button class="btn btn-sm btn-outline-danger" onclick="deleteCertification(<?php echo $cert['id']; ?>)">
+                                                                <i class="fas fa-trash"></i>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <p class="mb-1"><?php echo escape_output($cert['issuing_organization'] ?? $cert['issuer'] ?? ''); ?></p>
+                                                    <div class="d-flex justify-content-between">
+                                                        <small>
+                                                            <i class="fas fa-calendar me-1"></i>
+                                                            Issue Date: <?php echo isset($cert['issue_date']) ? format_date($cert['issue_date']) : 'Unknown'; ?>
+                                                        </small>
+                                                        <?php if(!empty($cert['expiry_date'])): ?>
+                                                            <small>
+                                                                <i class="fas fa-calendar-times me-1"></i>
+                                                                Expiry: <?php echo format_date($cert['expiry_date']); ?>
+                                                            </small>
+                                                        <?php endif; ?>
+                                                    </div>
+                                                    <?php if(!empty($cert['credential_url'])): ?>
+                                                        <div class="mt-2">
+                                                            <a href="<?php echo escape_output($cert['credential_url']); ?>" target="_blank" class="btn btn-sm btn-outline-primary">
+                                                                <i class="fas fa-external-link-alt me-1"></i> Verify
+                                                            </a>
+                                                        </div>
+                                                    <?php endif; ?>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php else: ?>
+                                        <div class="text-center py-4">
+                                            <i class="fas fa-certificate fa-3x text-muted mb-3"></i>
+                                            <p class="lead">No certifications added yet.</p>
+                                            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCertificationModal">
+                                                Add Certification
+                                            </button>
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-4">
+                            <div class="profile-card">
+                                <div class="profile-card-header">
+                                    <h5 class="mb-0"><i class="fas fa-university me-2"></i>Academic Details</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="mb-3">
+                                        <label class="form-label fw-bold">Branch:</label>
+                                        <p><?php echo escape_output($profileData['branch'] ?? 'Not specified'); ?></p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label class="form-label fw-bold">CGPA:</label>
+                                        <p><?php echo !empty($profileData['cgpa']) ? escape_output($profileData['cgpa']) : 'Not specified'; ?></p>
+                                    </div>
+                                    <div class="d-grid gap-2">
+                                        <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#updateAcademicDetailsModal">
+                                            <i class="fas fa-edit me-2"></i>Update Academic Details
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Notifications Tab -->
+                <div class="tab-pane fade" id="notifications" role="tabpanel" aria-labelledby="notifications-tab">
+                    <div class="profile-card">
+                        <div class="profile-card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0"><i class="fas fa-bell me-2"></i>Notifications</h5>
+                            <?php if(count($notifications) > 0): ?>
+                                <button class="btn btn-sm btn-outline-primary" id="markAllReadBtn">
+                                    <i class="fas fa-check-double me-1"></i>Mark All Read
+                                </button>
+                            <?php endif; ?>
+                        </div>
+                        <div class="card-body">
+                            <?php if(count($notifications) > 0): ?>
+                                <div class="list-group">
+                                    <?php foreach($notifications as $notification): ?>
+                                        <div class="list-group-item list-group-item-action <?php echo $notification['is_read'] ? '' : 'list-group-item-light'; ?>"
+                                            id="notification-<?php echo $notification['id']; ?>">
+                                            <div class="d-flex w-100 justify-content-between">
+                                                <h6 class="mb-1">
+                                                    <?php if(!$notification['is_read']): ?>
+                                                        <span class="badge bg-primary me-2">New</span>
+                                                    <?php endif; ?>
+                                                    <?php echo escape_output($notification['title']); ?>
+                                                </h6>
+                                                <small><?php echo format_date($notification['created_at']); ?></small>
+                                            </div>
+                                            <p class="mb-1"><?php echo escape_output($notification['message']); ?></p>
+                                            <div class="d-flex justify-content-end mt-2">
+                                                <?php if(!$notification['is_read']): ?>
+                                                    <button class="btn btn-sm btn-outline-primary read-notification"
+                                                            data-id="<?php echo $notification['id']; ?>">
+                                                        <i class="fas fa-check me-1"></i>Mark as Read
+                                                    </button>
+                                                <?php endif; ?>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php else: ?>
+                                <div class="text-center py-4">
+                                    <i class="fas fa-bell-slash fa-3x text-muted mb-3"></i>
+                                    <p class="lead">No notifications available.</p>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        <?php else: ?>
+            <div class="alert alert-warning" role="alert">
+                <h4 class="alert-heading"><i class="fas fa-exclamation-triangle me-2"></i>Profile Not Found</h4>
+                <p>Could not find your profile information. Please contact an administrator if this issue persists.</p>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- Edit Profile Modal -->
+    <div class="modal fade" id="editProfileModal" tabindex="-1" aria-labelledby="editProfileModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="editProfileModalLabel">Edit Profile</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="editProfileForm" action="update_profile.php" method="post">
+                        <div class="mb-3">
+                            <label for="fullName" class="form-label">Full Name</label>
+                            <input type="text" class="form-control" id="fullName" name="full_name" value="<?php echo htmlspecialchars($profileData['full_name'] ?? ''); ?>" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="branch" class="form-label">Branch</label>
+                            <select class="form-select" id="branch" name="branch" required>
+                                <option value="">Select Branch</option>
+                                <option value="Computer Science" <?php echo (($profileData['branch'] ?? '') == 'Computer Science') ? 'selected' : ''; ?>>Computer Science</option>
+                                <option value="Information Technology" <?php echo (($profileData['branch'] ?? '') == 'Information Technology') ? 'selected' : ''; ?>>Information Technology</option>
+                                <option value="Electronics" <?php echo (($profileData['branch'] ?? '') == 'Electronics') ? 'selected' : ''; ?>>Electronics</option>
+                                <option value="Computer Science" <?php echo ($profileData['branch'] ?? '') == 'Computer Science' ? 'selected' : ''; ?>>Computer Science</option>
+                                <option value="Information Technology" <?php echo ($profileData['branch'] ?? '') == 'Information Technology' ? 'selected' : ''; ?>>Information Technology</option>
+                                <option value="Electronics" <?php echo ($profileData['branch'] ?? '') == 'Electronics' ? 'selected' : ''; ?>>Electronics</option>
+                                <option value="Electrical" <?php echo ($profileData['branch'] ?? '') == 'Electrical' ? 'selected' : ''; ?>>Electrical</option>
+                                <option value="Mechanical" <?php echo ($profileData['branch'] ?? '') == 'Mechanical' ? 'selected' : ''; ?>>Mechanical</option>
+                                <option value="Civil" <?php echo ($profileData['branch'] ?? '') == 'Civil' ? 'selected' : ''; ?>>Civil</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="cgpa" class="form-label">CGPA</label>
+                            <input type="number" class="form-control" id="cgpa" name="cgpa" step="0.01" min="0" max="10" value="<?php echo escape_output($profileData['cgpa'] ?? ''); ?>">
+                        </div>
+                        <div class="mb-3">
+                            <label for="bio" class="form-label">Bio</label>
+                            <textarea class="form-control" id="bio" name="bio" rows="3"><?php echo escape_output($profileData['bio'] ?? ''); ?></textarea>
+                        </div>
+                        <div class="text-end">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Save Changes</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Profile Image Modal -->
+    <div class="modal fade" id="uploadProfileImageModal" tabindex="-1" aria-labelledby="uploadProfileImageModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="uploadProfileImageModalLabel">Change Profile Picture</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="uploadProfileImageForm" action="upload_profile_image.php" method="post" enctype="multipart/form-data">
+                        <div class="mb-3 text-center">
+                            <img src="uploads/<?php echo escape_output($profileData['profile_image']); ?>" alt="Current Profile Image" class="img-fluid mb-3" style="max-height: 200px; border-radius: 10px;">
+                            <div class="mb-3">
+                                <label for="profileImage" class="form-label">Select New Image</label>
+                                <input type="file" class="form-control" id="profileImage" name="profile_image" accept="image/*" required>
+                                <div class="form-text">Max file size: 2MB. Supported formats: JPG, PNG, GIF.</div>
+                            </div>
+                        </div>
+                        <div class="text-end">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Upload</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Skill Modal -->
+    <div class="modal fade" id="addSkillModal" tabindex="-1" aria-labelledby="addSkillModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addSkillModalLabel">Add Skill</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="addSkillForm" action="add_skill.php" method="post">
+                        <div class="mb-3">
+                            <label for="skillSelect" class="form-label">Select Skill</label>
+                            <select class="form-select" id="skillSelect" name="skill_id" required>
+                                <option value="">Choose a skill</option>
+                                <?php foreach($availableSkills as $skill): ?>
+                                    <option value="<?php echo $skill['id']; ?>"><?php echo escape_output($skill['name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="text-end">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Add Skill</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Education Modal -->
+    <div class="modal fade" id="addEducationModal" tabindex="-1" aria-labelledby="addEducationModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addEducationModalLabel">Add Education</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="addEducationForm" action="add_education.php" method="post">
+                        <div class="mb-3">
+                            <label for="degree" class="form-label">Degree/Certificate</label>
+                            <input type="text" class="form-control" id="degree" name="degree" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="institution" class="form-label">Institution</label>
+                            <input type="text" class="form-control" id="institution" name="institution" required>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="startYear" class="form-label">Start Year</label>
+                                <input type="number" class="form-control" id="startYear" name="start_year" min="1900" max="<?php echo date('Y'); ?>" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="endYear" class="form-label">End Year (leave blank if current)</label>
+                                <input type="number" class="form-control" id="endYear" name="end_year" min="1900" max="<?php echo date('Y') + 10; ?>">
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="grade" class="form-label">Grade/CGPA</label>
+                            <input type="text" class="form-control" id="grade" name="grade">
+                        </div>
+                        <div class="mb-3">
+                            <label for="description" class="form-label">Description</label>
+                            <textarea class="form-control" id="description" name="description" rows="3"></textarea>
+                        </div>
+                        <div class="text-end">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="submit" class="btn btn-primary">Add Education</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript for Profile Functionality -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Handle skill removal
+            function removeSkill(skillId) {
+                if (confirm('Are you sure you want to remove this skill?')) {
+                    fetch('remove_skill.php', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: 'skill_id=' + skillId
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            location.reload();
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                }
+            }
+
+            // Make removeSkill function available globally
+            window.removeSkill = removeSkill;
+
+            // Handle education editing
+            window.editEducation = function(educationId) {
+                // Fetch education details and populate the edit form
+                fetch('get_education.php?id=' + educationId)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            // Create or update the edit education form
+                            // This is a simplified example - you might want to create a dedicated modal for editing
+                            const editForm = document.getElementById('addEducationForm');
+                            editForm.action = 'update_education.php';
+                            
+                            // Add the education ID as a hidden field
+                            let idInput = document.createElement('input');
+                            idInput.type = 'hidden';
+                            idInput.name = 'id';
+                            idInput.value = educationId;
+                            editForm.appendChild(idInput);
+                            
+                            // Populate the form fields
+                            document.getElementById('degree').value = data.education.degree;
+                            document.getElementById('institution').value = data.education.institution;
+                            document.getElementById('startYear').value = data.education.start_year;
+                            document.getElementById('endYear').value = data.education.end_year || '';
+                            document.getElementById('grade').value = data.education.grade || '';
+                            document.getElementById('description').value = data.education.description || '';
+                            
+                            // Update modal title
+                            document.getElementById('addEducationModalLabel').textContent = 'Edit Education';
+                            
+                            // Show the modal
+                            const modal = new bootstrap.Modal(document.getElementById('addEducationModal'));
+                            modal.show();
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+            };
+
+            // Handle education deletion
+            window.deleteEducation = function(educationId) {
+                if (confirm('Are you sure you want to delete this education record?')) {
+                    fetch('delete_education.php', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: 'id=' + educationId
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            location.reload();
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                }
+            };
+
+            // Handle marking notifications as read
+            const readNotificationButtons = document.querySelectorAll('.read-notification');
+            readNotificationButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    const notificationId = this.getAttribute('data-id');
+                    fetch('mark_notification_read.php', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: 'notification_id=' + notificationId
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            // Update UI
+                            document.getElementById('notification-' + notificationId).classList.remove('list-group-item-light');
+                            this.style.display = 'none';
+                            const badgeElement = document.getElementById('notification-' + notificationId).querySelector('.badge');
+                            if (badgeElement) {
+                                badgeElement.remove();
+                            }
+                            
+                            // Update notification count in the navbar
+                            const notificationCountElement = document.querySelector('#notifications-tab .badge');
+                            if (notificationCountElement) {
+                                const currentCount = parseInt(notificationCountElement.textContent);
+                                if (currentCount > 1) {
+                                    notificationCountElement.textContent = currentCount - 1;
+                                } else {
+                                    notificationCountElement.remove();
+                                }
+                            }
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                });
+            });
+
+            // Handle mark all notifications as read
+            const markAllReadBtn = document.getElementById('markAllReadBtn');
+            if (markAllReadBtn) {
+                markAllReadBtn.addEventListener('click', function() {
+                    fetch('mark_all_notifications_read.php', {
+                        method: 'POST'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            // Update UI
+                            document.querySelectorAll('.list-group-item-light').forEach(item => {
+                                item.classList.remove('list-group-item-light');
+                            });
+                            document.querySelectorAll('.read-notification').forEach(button => {
+                                button.style.display = 'none';
+                            });
+                            document.querySelectorAll('.badge.bg-primary').forEach(badge => {
+                                badge.remove();
+                            });
+                            
+                            // Remove notification count badge
+                            const notificationCountElement = document.querySelector('#notifications-tab .badge');
+                            if (notificationCountElement) {
+                                notificationCountElement.remove();
+                            }
+                            
+                            // Hide the mark all read button
+                            this.style.display = 'none';
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                    });
+                });
+            }
+
+            // Reset add education form when modal is closed
+            document.getElementById('addEducationModal').addEventListener('hidden.bs.modal', function() {
+                document.getElementById('addEducationForm').reset();
+                document.getElementById('addEducationForm').action = 'add_education.php';
+                document.getElementById('addEducationModalLabel').textContent = 'Add Education';
+                
+                // Remove any hidden ID field
+                const idInput = document.querySelector('#addEducationForm input[name="id"]');
+                if (idInput) {
+                    idInput.remove();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
+<?php
+// Close database connection here at the very end of the file
+$conn->close();
+?>

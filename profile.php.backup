@@ -1,0 +1,1723 @@
+<?php
+// Start output buffering to capture any output
+ob_start();
+
+// Include configuration and functions
+require_once 'config.php';
+require_once 'functions.php';
+
+// Start session if not already started
+if (session_status() == PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Check if user is logged in
+if (!is_logged_in()) {
+    redirect('login.php');
+    exit;
+}
+
+// Get user ID
+$user_id = get_user_id();
+
+// Initialize arrays to prevent undefined variable errors
+$profileData = [];
+$skills = [];
+$education = [];
+$experience = [];
+$projects = [];
+$certifications = [];
+$applications = [];
+$notifications = [];
+$recommendedSkills = [];
+$unreadNotifications = 0;
+
+// Check for JSON at the beginning of the request body
+$input = file_get_contents('php://input');
+$jsonData = null;
+
+if (!empty($input)) {
+    // Try to find valid JSON at the start of the input
+    $jsonStart = strpos($input, '{');
+    $htmlStart = strpos($input, '<!DOCTYPE');
+    
+    if ($jsonStart !== false && $htmlStart !== false && $jsonStart < $htmlStart) {
+        // Extract just the JSON portion
+        $jsonText = substr($input, $jsonStart, $htmlStart - $jsonStart);
+        $jsonData = json_decode($jsonText, true);
+        
+        if ($jsonData && is_array($jsonData)) {
+            // We found valid JSON
+            $profileData = $jsonData;
+            $skills = $jsonData['skills'] ?? [];
+            $education = $jsonData['education'] ?? [];
+            $experience = $jsonData['experience'] ?? [];
+            $projects = $jsonData['projects'] ?? [];
+            $certifications = $jsonData['certifications'] ?? [];
+            
+            // Debug print
+            echo "<!-- Found JSON data at beginning of input -->";
+        }
+    } else {
+        // Try parsing the entire input as JSON
+        $jsonData = json_decode($input, true);
+        if ($jsonData && is_array($jsonData)) {
+            // Entire input was valid JSON
+            $profileData = $jsonData;
+            $skills = $jsonData['skills'] ?? [];
+            $education = $jsonData['education'] ?? [];
+            $experience = $jsonData['experience'] ?? [];
+            $projects = $jsonData['projects'] ?? [];
+            $certifications = $jsonData['certifications'] ?? [];
+            
+            // Debug print
+            echo "<!-- Parsed entire input as JSON -->";
+        }
+    }
+}
+
+// Check if we need to load data from database (if no valid JSON was found)
+if (empty($profileData['user_id']) && empty($profileData['id'])) {
+    // Check if there's any JSON in the output buffer
+    $output = ob_get_contents();
+    ob_clean(); // Clear buffer
+    
+    // Look for JSON in the output
+    if (!empty($output)) {
+        $jsonStart = strpos($output, '{');
+        $jsonEnd = strpos($output, '<!DOCTYPE html>');
+        
+        if ($jsonStart !== false && $jsonEnd !== false) {
+            $jsonString = substr($output, $jsonStart, $jsonEnd - $jsonStart);
+            $jsonData = json_decode($jsonString, true);
+            
+            if ($jsonData && is_array($jsonData)) {
+                $profileData = $jsonData;
+                $skills = $jsonData['skills'] ?? [];
+                $education = $jsonData['education'] ?? [];
+                $experience = $jsonData['experience'] ?? [];
+                $projects = $jsonData['projects'] ?? [];
+                $certifications = $jsonData['certifications'] ?? [];
+                
+                // Start a new output buffer for the rest of the page
+                ob_start();
+                // Echo the HTML part back to the output
+                echo substr($output, $jsonEnd);
+                
+                // Debug output
+                echo "<!-- Found JSON data in output buffer -->";
+            } else {
+                // No valid JSON, just echo everything back
+                ob_start();
+                echo $output;
+            }
+        } else {
+            // No JSON structure found, just echo everything back
+            ob_start();
+            echo $output;
+        }
+    } else {
+        // Start fresh output buffer
+        ob_start();
+    }
+    
+    // If we still don't have profile data, load from database
+    if (empty($profileData['user_id']) && empty($profileData['id'])) {
+        // Load data from database
+        // ... existing database loading code ...
+    }
+}
+
+// Database connection
+$host = "localhost";
+$username = "root";
+$password = "";
+$database = "placement_portal";
+
+$conn = mysqli_connect($host, $username, $password, $database);
+
+// Check connection
+if (!$conn) {
+    die("Connection failed: " . mysqli_connect_error());
+}
+
+// Get user ID from session
+$user_id = $_SESSION['user_id'];
+
+// Calculate profile completion percentage
+function calculate_student_completion($student) {
+    $total_fields = 10; // Basic fields we're counting
+    $filled_fields = 0;
+    
+    // Basic profile fields
+    $check_fields = ['full_name', 'email', 'phone', 'department', 'degree', 'year', 'cgpa', 'profile_image', 'bio', 'address'];
+    
+    foreach ($check_fields as $field) {
+        if (isset($student[$field]) && !empty($student[$field]) && $student[$field] != 'default.jpg') {
+            $filled_fields++;
+        }
+    }
+    
+    // Calculate percentage
+    $completion = round(($filled_fields / $total_fields) * 100);
+    return $completion > 100 ? 100 : $completion;
+}
+
+// Check if students table exists
+$table_exists = false;
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'students'");
+if (mysqli_num_rows($result) > 0) {
+    $table_exists = true;
+}
+
+// Fetch student data - check if using students or users table
+if ($table_exists) {
+    // Using students table
+    $sql = "SELECT * FROM students WHERE user_id = ?";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    
+    if (mysqli_num_rows($result) > 0) {
+        $student = mysqli_fetch_assoc($result);
+    } else {
+        // Try with id instead of user_id
+        $sql = "SELECT * FROM students WHERE id = ?";
+        $stmt = mysqli_prepare($conn, $sql);
+        mysqli_stmt_bind_param($stmt, "i", $user_id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        
+        if (mysqli_num_rows($result) > 0) {
+            $student = mysqli_fetch_assoc($result);
+        } else {
+            // Handle case where student data is not found
+            echo "Student data not found.";
+            exit();
+        }
+    }
+} else {
+    // Using users table from db_setup.php
+    $sql = "SELECT * FROM users WHERE id = ?";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    
+    if (mysqli_num_rows($result) > 0) {
+        $student = mysqli_fetch_assoc($result);
+        // Map fields to match the students table naming
+        if (isset($student['branch'])) $student['department'] = $student['branch'];
+        if (isset($student['year_of_study'])) $student['year'] = $student['year_of_study'];
+        if (isset($student['profile_pic'])) $student['profile_image'] = $student['profile_pic'];
+    } else {
+        // Handle case where user data is not found
+        echo "User data not found.";
+        exit();
+    }
+}
+
+// Fetch skills
+$sql = "SELECT * FROM skills WHERE user_id = ?";
+$stmt = mysqli_prepare($conn, $sql);
+mysqli_stmt_bind_param($stmt, "i", $user_id);
+mysqli_stmt_execute($stmt);
+$skillsResult = mysqli_stmt_get_result($stmt);
+
+$skills = [];
+while ($row = mysqli_fetch_assoc($skillsResult)) {
+    $skills[] = $row;
+}
+
+// Group skills by type
+$skillsByType = [];
+foreach ($skills as $skill) {
+    $type = $skill['skill_type'] ?? 'Other';
+    if (!isset($skillsByType[$type])) {
+        $skillsByType[$type] = [];
+    }
+    $skillsByType[$type][] = $skill;
+}
+
+// Fetch education if table exists
+$education = [];
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'education'");
+if (mysqli_num_rows($result) > 0) {
+    $sql = "SELECT * FROM education WHERE user_id = ?";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $educationResult = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($educationResult)) {
+        $education[] = $row;
+    }
+}
+
+// Fetch experience if table exists
+$experience = [];
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'experience'");
+if (mysqli_num_rows($result) > 0) {
+    $sql = "SELECT * FROM experience WHERE user_id = ? ORDER BY is_current DESC, end_date DESC";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $experienceResult = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($experienceResult)) {
+        $experience[] = $row;
+    }
+}
+
+// Get projects
+$sql = "SELECT * FROM projects WHERE user_id = ?";
+$stmt = $conn->prepare($sql);
+$stmt->bind_param("i", $user_id);
+$stmt->execute();
+$projects_result = $stmt->get_result();
+if ($projects_result) {
+    while ($proj = $projects_result->fetch_assoc()) {
+        $projects[] = $proj;
+    }
+}
+
+// Fetch certifications if table exists
+$certifications = [];
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'certifications'");
+if (mysqli_num_rows($result) > 0) {
+    $sql = "SELECT * FROM certifications WHERE user_id = ? ORDER BY issue_date DESC";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $certificationsResult = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($certificationsResult)) {
+        $certifications[] = $row;
+    }
+}
+
+// Fetch documents if table exists
+$documents = [];
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'documents'");
+if (mysqli_num_rows($result) > 0) {
+    $sql = "SELECT * FROM documents WHERE user_id = ? ORDER BY uploaded_at DESC";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $documentsResult = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($documentsResult)) {
+        $documents[] = $row;
+    }
+}
+
+// Fetch notifications if table exists
+$notifications = [];
+$unreadCount = 0;
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'notifications'");
+if (mysqli_num_rows($result) > 0) {
+    $sql = "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 5";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $notificationsResult = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($notificationsResult)) {
+        $notifications[] = $row;
+    }
+
+    // Count unread notifications
+    $sql = "SELECT COUNT(*) as unread_count FROM notifications WHERE user_id = ? AND is_read = 0";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $unreadResult = mysqli_stmt_get_result($stmt);
+    $unreadRow = mysqli_fetch_assoc($unreadResult);
+    $unreadCount = $unreadRow['unread_count'];
+}
+
+// Fetch applications if table exists
+$applications = [];
+$result = mysqli_query($conn, "SHOW TABLES LIKE 'applications'");
+if (mysqli_num_rows($result) > 0) {
+    $sql = "SELECT a.*, j.title as job_title, c.name as company_name 
+            FROM applications a 
+            JOIN jobs j ON a.job_id = j.id 
+            JOIN companies c ON j.company_id = c.id 
+            WHERE a.user_id = ? 
+            ORDER BY a.applied_date DESC";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "i", $user_id);
+    mysqli_stmt_execute($stmt);
+    $applicationsResult = mysqli_stmt_get_result($stmt);
+
+    while ($row = mysqli_fetch_assoc($applicationsResult)) {
+        $applications[] = $row;
+    }
+}
+
+// Calculate profile completion percentage
+$completionFields = [
+    'full_name', 'email', 'personal_email', 'phone', 'dob', 
+    'department', 'degree', 'year', 'cgpa', 'profile_image', 
+    'linkedin', 'github'
+];
+
+// Add additional fields if they exist in the student record
+if (isset($student['address'])) $completionFields[] = 'address';
+if (isset($student['city'])) $completionFields[] = 'city';
+if (isset($student['state'])) $completionFields[] = 'state';
+if (isset($student['country'])) $completionFields[] = 'country';
+if (isset($student['bio'])) $completionFields[] = 'bio';
+if (isset($student['resume_url'])) $completionFields[] = 'resume_url';
+
+$completedFields = 0;
+foreach ($completionFields as $field) {
+    if (isset($student[$field]) && !empty($student[$field])) {
+        $completedFields++;
+    }
+}
+
+$completionPercentage = round(($completedFields / count($completionFields)) * 100);
+
+// Format date function
+function formatDate($date) {
+    if (empty($date)) return 'N/A';
+    return date('d M Y', strtotime($date));
+}
+
+// Handle mark notification as read
+if (isset($_POST['mark_read']) && isset($_POST['notification_id'])) {
+    $notification_id = $_POST['notification_id'];
+    
+    $sql = "UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?";
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "ii", $notification_id, $user_id);
+    mysqli_stmt_execute($stmt);
+    
+    // Redirect to refresh the page
+    header("Location: profile.php");
+    exit();
+}
+
+// Handle document upload
+if (isset($_POST['upload_document'])) {
+    $document_name = $_POST['document_name'];
+    $document_type = $_POST['document_type'];
+    
+    // Check if file was uploaded without errors
+    if (isset($_FILES['document_file']) && $_FILES['document_file']['error'] == 0) {
+        $allowed_types = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+        $file_type = $_FILES['document_file']['type'];
+        
+        if (in_array($file_type, $allowed_types)) {
+            $file_name = time() . '_' . $_FILES['document_file']['name'];
+            $upload_dir = 'uploads/documents/';
+            
+            // Create directory if it doesn't exist
+            if (!file_exists($upload_dir)) {
+                mkdir($upload_dir, 0777, true);
+            }
+            
+            $upload_path = $upload_dir . $file_name;
+            
+            if (move_uploaded_file($_FILES['document_file']['tmp_name'], $upload_path)) {
+                // Insert document record into database
+                $sql = "INSERT INTO documents (user_id, document_name, document_type, file_path) VALUES (?, ?, ?, ?)";
+                $stmt = mysqli_prepare($conn, $sql);
+                mysqli_stmt_bind_param($stmt, "isss", $user_id, $document_name, $document_type, $upload_path);
+                mysqli_stmt_execute($stmt);
+                
+                // Redirect to refresh the page
+                header("Location: profile.php?tab=placement&upload=success");
+                exit();
+            } else {
+                $upload_error = "Failed to upload file.";
+            }
+        } else {
+            $upload_error = "Invalid file type. Please upload PDF or Word documents.";
+        }
+    } else {
+        $upload_error = "Error uploading file. Please try again.";
+    }
+}
+
+// Handle resume upload
+if (isset($_POST['upload_resume'])) {
+    // Check if file was uploaded without errors
+    if (isset($_FILES['resume_file']) && $_FILES['resume_file']['error'] == 0) {
+        $allowed_types = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+        $file_type = $_FILES['resume_file']['type'];
+        
+        if (in_array($file_type, $allowed_types)) {
+            $file_name = 'resume_' . $user_id . '_' . time() . '.' . pathinfo($_FILES['resume_file']['name'], PATHINFO_EXTENSION);
+            $upload_dir = 'uploads/resumes/';
+            
+            // Create directory if it doesn't exist
+            if (!file_exists($upload_dir)) {
+                mkdir($upload_dir, 0777, true);
+            }
+            
+            $upload_path = $upload_dir . $file_name;
+            
+            if (move_uploaded_file($_FILES['resume_file']['tmp_name'], $upload_path)) {
+                // Update resume_url in student/user record
+                if ($table_exists) {
+                    $sql = "UPDATE students SET resume_url = ? WHERE id = ?";
+                } else {
+                    $sql = "UPDATE users SET resume_url = ? WHERE id = ?";
+                }
+                
+                $stmt = mysqli_prepare($conn, $sql);
+                mysqli_stmt_bind_param($stmt, "si", $upload_path, $user_id);
+                mysqli_stmt_execute($stmt);
+                
+                // Redirect to refresh the page
+                header("Location: profile.php?tab=placement&resume=success");
+                exit();
+            } else {
+                $resume_error = "Failed to upload resume.";
+            }
+        } else {
+            $resume_error = "Invalid file type. Please upload PDF or Word documents.";
+        }
+    } else {
+        $resume_error = "Error uploading resume. Please try again.";
+    }
+}
+
+// Handle profile image upload
+if (isset($_POST['upload_profile_image'])) {
+    $upload_dir = 'uploads/';
+    
+    // Create uploads directory if it doesn't exist
+    if (!file_exists($upload_dir)) {
+        mkdir($upload_dir, 0777, true);
+    }
+    
+    // Check if file was uploaded without errors
+    if (isset($_FILES['profile_image']) && $_FILES['profile_image']['error'] == 0) {
+        $allowed_types = ['image/jpeg', 'image/jpg', 'image/png'];
+        $max_size = 2 * 1024 * 1024; // 2MB
+        
+        // Check file type and size
+        if (in_array($_FILES['profile_image']['type'], $allowed_types) && $_FILES['profile_image']['size'] <= $max_size) {
+            $file_name = 'profile_' . $user_id . '_' . time() . '.jpg';
+            $file_path = $upload_dir . $file_name;
+            
+            // Move the uploaded file
+            if (move_uploaded_file($_FILES['profile_image']['tmp_name'], $file_path)) {
+                // Update the profile image in the database
+                $sql = "UPDATE users SET profile_pic = ? WHERE id = ?";
+                
+                // Check if users table has profile_pic field
+                $result = mysqli_query($conn, "SHOW COLUMNS FROM users LIKE 'profile_pic'");
+                if (mysqli_num_rows($result) == 0) {
+                    // Check for profile_image field instead
+                    $result = mysqli_query($conn, "SHOW COLUMNS FROM users LIKE 'profile_image'");
+                    if (mysqli_num_rows($result) > 0) {
+                        $sql = "UPDATE users SET profile_image = ? WHERE id = ?";
+                    }
+                }
+                
+                $stmt = mysqli_prepare($conn, $sql);
+                mysqli_stmt_bind_param($stmt, "si", $file_path, $user_id);
+                mysqli_stmt_execute($stmt);
+                
+                // Update the student data for display
+                $student['profile_image'] = $file_path;
+                // Also update profile pic for compatibility
+                $student['profile_pic'] = $file_path;
+                
+                // Log the activity
+                log_activity($user_id, 'Updated profile picture');
+                
+                // Set success message
+                $_SESSION['success_message'] = "Profile picture updated successfully!";
+                
+                // Redirect to refresh the page and avoid form resubmission
+                header("Location: profile.php");
+                exit();
+            } else {
+                $profile_image_error = "Failed to upload file. Please try again.";
+            }
+        } else {
+            if ($_FILES['profile_image']['size'] > $max_size) {
+                $profile_image_error = "File is too large. Maximum size is 2MB.";
+            } else {
+                $profile_image_error = "Invalid file type. Please upload a JPEG or PNG file.";
+            }
+        }
+    } else {
+        $profile_image_error = "Error uploading file. Please try again.";
+    }
+}
+
+// Check if there's a success message to display
+$success_message = isset($_SESSION['success_message']) ? $_SESSION['success_message'] : '';
+unset($_SESSION['success_message']); // Clear the message after retrieving it
+
+// Get active tab from URL parameter or default to 'basic'
+$active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'basic';
+
+// If no JSON data found, try to find JSON in the output buffer
+ob_start();
+$existingOutput = ob_get_clean();
+
+if (empty($profileData) && !empty($existingOutput)) {
+    $jsonStart = strpos($existingOutput, '{');
+    $jsonEnd = strpos($existingOutput, '<!DOCTYPE html>');
+    
+    if ($jsonStart !== false && $jsonEnd !== false) {
+        $jsonString = substr($existingOutput, $jsonStart, $jsonEnd - $jsonStart);
+        $jsonData = json_decode($jsonString, true);
+        
+        if ($jsonData && json_last_error() === JSON_ERROR_NONE) {
+            $profileData = $jsonData;
+            $skills = $jsonData['skills'] ?? [];
+            $education = $jsonData['education'] ?? [];
+            $experience = $jsonData['experience'] ?? [];
+            $projects = $jsonData['projects'] ?? [];
+            $certifications = $jsonData['certifications'] ?? [];
+            
+            // Start output buffer again for rest of page
+            ob_start();
+            echo substr($existingOutput, $jsonEnd);
+        } else {
+            // No valid JSON, just echo everything back
+            ob_start();
+            echo $existingOutput;
+        }
+    } else {
+        // Start fresh output buffer
+        ob_start();
+    }
+}
+
+// Debug - print our $profileData and $projects arrays to check if data is being loaded correctly
+echo "<!-- Debug: ";
+echo "ProfileData: " . (empty($profileData) ? "EMPTY" : "NOT EMPTY") . ", ";
+echo "Projects: " . (empty($projects) ? "EMPTY" : "NOT EMPTY (" . count($projects) . " items)");
+echo " -->";
+
+// Put the JSON that comes directly in the page in a hidden field
+// This will enable us to parse it client-side if needed
+$pageContent = ob_get_contents();
+$jsonData = null;
+
+// Look for JSON in the page content
+if (!empty($pageContent)) {
+    $jsonStart = strpos($pageContent, '{');
+    $jsonEnd = strpos($pageContent, '<!DOCTYPE html>');
+    
+    if ($jsonStart !== false && $jsonEnd !== false) {
+        $jsonString = substr($pageContent, $jsonStart, $jsonEnd - $jsonStart);
+        $jsonData = $jsonString;
+    }
+}
+
+// Output hidden field with JSON data
+if (!empty($jsonData)) {
+    echo '<input type="hidden" id="profile-json-data" value="' . htmlspecialchars($jsonData) . '">';
+    
+    // Add JavaScript to parse JSON data on page load
+    echo '<script>';
+    echo 'document.addEventListener("DOMContentLoaded", function() {';
+    echo '    const jsonDataField = document.getElementById("profile-json-data");';
+    echo '    if (jsonDataField) {';
+    echo '        try {';
+    echo '            const jsonData = JSON.parse(jsonDataField.value);';
+    echo '            console.log("JSON Data parsed successfully:", jsonData);';
+    echo '            ';
+    echo '            // Populate profile data';
+    echo '            if (jsonData.full_name) {';
+    echo '                document.querySelectorAll(".user-name").forEach(el => el.textContent = jsonData.full_name);';
+    echo '            }';
+    echo '            if (jsonData.email) {';
+    echo '                document.querySelectorAll(".user-email").forEach(el => el.textContent = jsonData.email);';
+    echo '            }';
+    echo '            if (jsonData.department) {';
+    echo '                document.querySelectorAll(".user-department").forEach(el => el.textContent = jsonData.department);';
+    echo '            }';
+    echo '            ';
+    echo '            // Populate skills';
+    echo '            if (jsonData.skills && jsonData.skills.length > 0) {';
+    echo '                const skillsContainer = document.querySelector(".skills-container");';
+    echo '                if (skillsContainer) {';
+    echo '                    skillsContainer.innerHTML = "";';
+    echo '                    jsonData.skills.forEach(skill => {';
+    echo '                        const skillBadge = document.createElement("div");';
+    echo '                        skillBadge.className = "skills-badge d-flex align-items-center";';
+    echo '                        skillBadge.textContent = skill.name;';
+    echo '                        skillsContainer.appendChild(skillBadge);';
+    echo '                    });';
+    echo '                }';
+    echo '            }';
+    echo '        } catch (error) {';
+    echo '            console.error("Error parsing JSON data:", error);';
+    echo '        }';
+    echo '    }';
+    echo '});';
+    echo '</script>';
+}
+
+// Correctly construct the path to the profile image
+$profile_image = isset($student['profile_image']) ? $student['profile_image'] : '';
+if (empty($profile_image)) {
+    $profile_image = isset($student['profile_pic']) ? $student['profile_pic'] : 'default.jpg';
+}
+
+// Define a function to get the profile image URL if it doesn't exist
+if (!function_exists('get_profile_image')) {
+    function get_profile_image($profileImage = null) {
+        // Check if the profile image exists in uploads/profile_pics
+        if (!empty($profileImage) && file_exists('uploads/profile_pics/' . $profileImage) && $profileImage != 'default.jpg') {
+            return 'uploads/profile_pics/' . $profileImage;
+        }
+        
+        // Check if the profile image exists without the directory
+        if (!empty($profileImage) && file_exists($profileImage) && $profileImage != 'default.jpg') {
+            return $profileImage;
+        }
+        
+        // Check if default.svg exists
+        if (file_exists('uploads/profile_pics/default.svg')) {
+            return 'uploads/profile_pics/default.svg';
+        }
+        
+        // Return a data URI for a simple avatar as fallback
+        return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200' viewBox='0 0 200 200'%3E%3Ccircle cx='100' cy='70' r='50' fill='%234A90E2'/%3E%3Ccircle cx='100' cy='250' r='120' fill='%234A90E2'/%3E%3C/svg%3E";
+    }
+}
+
+// Initialize $projects array if not defined
+if (!isset($projects)) {
+    $projects = [];
+}
+
+// Make sure $student is defined
+if (!isset($student) || empty($student)) {
+    $student = [
+        'full_name' => 'Student Name',
+        'email' => '',
+        'phone' => '',
+        'department' => '',
+        'degree' => '',
+        'year' => '',
+        'cgpa' => '',
+        'backlogs' => '0',
+        'reg_number' => '',
+        'profile_image' => 'default.jpg',
+        'country' => 'India'
+    ];
+}
+
+// Debug information (will be shown as HTML comments)
+echo "<!-- Debug information: -->\n";
+echo "<!-- User ID: " . ($user_id ?? 'not set') . " -->\n";
+echo "<!-- Student data exists: " . (isset($student) && !empty($student) ? 'Yes' : 'No') . " -->\n";
+if (isset($student) && !empty($student)) {
+    echo "<!-- Profile image value: " . ($student['profile_image'] ?? 'not set') . " -->\n";
+    echo "<!-- Profile image file exists: " . (file_exists('uploads/profile_pics/' . ($student['profile_image'] ?? '')) ? 'Yes' : 'No') . " -->\n";
+    echo "<!-- Path being used: " . get_profile_image($student['profile_image'] ?? null) . " -->\n";
+}
+echo "<!-- End debug information -->\n";
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile - Practice Pro</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts - Poppins -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        .profile-avatar {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 4px solid white;
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+        }
+        
+        .profile-completion {
+            height: 8px;
+            border-radius: 4px;
+        }
+        
+        .nav-pills .nav-link.active {
+            background-color: var(--bs-primary);
+        }
+        
+        .badge-skill {
+            font-weight: normal;
+            padding: 0.5em 0.75em;
+            margin-right: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        .badge-prog {
+            background-color: #e6f2ff;
+            color: #0d6efd;
+        }
+        
+        .badge-framework {
+            background-color: #e6fff2;
+            color: #198754;
+        }
+        
+        .badge-db {
+            background-color: #f2e6ff;
+            color: #6f42c1;
+        }
+        
+        .badge-soft {
+            background-color: #fff8e6;
+            color: #fd7e14;
+        }
+        
+        .badge-other {
+            background-color: #f2f2f2;
+            color: #6c757d;
+        }
+        
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
+        }
+        
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            width: 2px;
+            background-color: #dee2e6;
+        }
+        
+        .timeline-item {
+            position: relative;
+            padding-bottom: 2rem;
+        }
+        
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -2.25rem;
+            top: 0;
+            width: 1rem;
+            height: 1rem;
+            border-radius: 50%;
+            background-color: var(--bs-primary);
+        }
+        
+        .notification-item {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .notification-unread {
+            background-color: #e6f2ff;
+        }
+        
+        .table-applications th {
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            color: #6c757d;
+        }
+        
+        .company-icon {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 50%;
+            background-color: #f8f9fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.75rem;
+            margin-right: 0.75rem;
+        }
+        
+        .document-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem;
+            background-color: #f8f9fa;
+            border-radius: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <nav id="sidebar" class="col-md-3 col-lg-2 d-md-block bg-light sidebar collapse">
+                <div class="position-sticky pt-3">
+                    <div class="d-flex align-items-center justify-content-between p-3 border-bottom">
+                        <a href="index.php" class="text-decoration-none d-flex align-items-center">
+                            <i class="fas fa-graduation-cap text-primary me-2"></i>
+                            <span class="fs-5 fw-semibold text-dark">SRM University</span>
+                        </a>
+                        <button type="button" class="btn-close d-md-none" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+                    </div>
+                    <ul class="nav flex-column mt-3">
+                        <li class="nav-item">
+                            <a class="nav-link" href="home.php">
+                                <i class="fas fa-tachometer-alt me-2"></i>
+                                Home
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="jobs.php">
+                                <i class="fas fa-briefcase me-2"></i>
+                                Jobs
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="applications.php">
+                                <i class="fas fa-file-alt me-2"></i>
+                                Applications
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link active" href="profile.php">
+                                <i class="fas fa-user me-2"></i>
+                                Profile
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="resume.php">
+                                <i class="fa-solid fa-magnifying-glass me-2"></i>
+                                Resume Testing                            
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="schedule.php">
+                                <i class="fa-solid fa-calendar-days me-2"></i>
+                                Attendance Details
+                            </a>
+                        </li>
+                    </ul>
+                    
+                    <hr class="my-3">
+                    
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link" href="settings.php">
+                                <i class="fas fa-cog me-2"></i>
+                                Settings
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="logout.php">
+                                <i class="fas fa-sign-out-alt me-2"></i>
+                                Logout
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </nav>
+
+            <!-- Main content -->
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <header class="d-flex justify-content-between align-items-center py-3 mb-4 border-bottom">
+                    <button class="btn d-md-none" type="button" data-bs-toggle="offcanvas" data-bs-target="#sidebar">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="dropdown">
+                            <a class="btn btn-light position-relative" href="#" role="button" id="notificationDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                                <i class="fas fa-bell"></i>
+                                <?php if ($unreadCount > 0): ?>
+                                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
+                                    <?php echo $unreadCount; ?>
+                                </span>
+                                <?php endif; ?>
+                            </a>
+                            <ul class="dropdown-menu dropdown-menu-end notification-dropdown" aria-labelledby="notificationDropdown">
+                                <li><h6 class="dropdown-header">Notifications</h6></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <?php if (count($notifications) > 0): ?>
+                                    <?php foreach ($notifications as $notification): ?>
+                                    <li>
+                                        <a class="dropdown-item notification-item <?php echo $notification['is_read'] ? '' : 'notification-unread'; ?>" href="#">
+                                            <div class="d-flex justify-content-between">
+                                                <strong><?php echo htmlspecialchars($notification['title']); ?></strong>
+                                                <small class="text-muted"><?php echo date('j M', strtotime($notification['created_at'])); ?></small>
+                                            </div>
+                                            <p class="mb-0 small"><?php echo htmlspecialchars($notification['message']); ?></p>
+                                            <?php if (!$notification['is_read']): ?>
+                                            <form method="post" class="mt-1">
+                                                <input type="hidden" name="notification_id" value="<?php echo $notification['id']; ?>">
+                                                <button type="submit" name="mark_read" class="btn btn-sm btn-light">Mark as read</button>
+                                            </form>
+                                            <?php endif; ?>
+                                        </a>
+                                    </li>
+                                    <li><hr class="dropdown-divider"></li>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <li><a class="dropdown-item" href="#">No notifications</a></li>
+                                    <li><hr class="dropdown-divider"></li>
+                                <?php endif; ?>
+                                <li><a class="dropdown-item text-center small" href="#">View all notifications</a></li>
+                            </ul>
+                        </div>
+                        
+                        <!-- User Profile -->
+                        <div class="dropdown">
+                            <a class="dropdown-toggle d-flex align-items-center hidden-arrow" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                <?php 
+                                $profile_image = isset($student['profile_image']) ? $student['profile_image'] : '';
+                                if (empty($profile_image)) {
+                                    $profile_image = isset($student['profile_pic']) ? $student['profile_pic'] : 'default.jpg';
+                                }
+                                ?>
+                                <img src="<?php echo get_profile_image($student['profile_image'] ?? null); ?>" class="rounded-circle" height="32" alt="Student" loading="lazy" />
+                                <span class="ms-2 d-none d-md-inline" style="font-size:20px; text-decoration: none;"><?php echo htmlspecialchars($student['full_name']); ?></span>
+                            </a>
+                            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userDropdown">
+                                <li><a class="dropdown-item" href="profile.php">My Profile</a></li>
+                                <li><a class="dropdown-item" href="settings.php">Settings</a></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><a class="dropdown-item" href="logout.php">Logout</a></li>
+                            </ul>
+                        </div>
+                    </div>
+                </header>
+
+                <div class="container mt-4">
+                    <?php if (isset($success_message) && !empty($success_message)): ?>
+                    <div class="alert alert-success alert-dismissible fade show" role="alert">
+                        <?php echo escape_output($success_message); ?>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                    <?php endif; ?>
+                    
+                    <!-- First Card: User Basic Information -->
+                    <div class="card shadow-sm mb-4">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between mb-3">
+                                <div class="d-flex align-items-center">
+                                    <img src="<?php echo get_profile_image($student['profile_image'] ?? null); ?>" alt="Profile Image" class="simple-profile-image me-3" style="width: 60px; height: 60px; object-fit: cover; border-radius: 50%;">
+                                    <h5 class="mb-0"><?php echo escape_output($student['full_name'] ?? ''); ?></h5>
+                                </div>
+                                <div>
+                                    <a href="#" class="btn btn-sm btn-outline-primary me-2" data-bs-toggle="modal" data-bs-target="#editProfileModal">
+                                        <i class="fas fa-edit me-1"></i> Edit Profile
+                                    </a>
+                                    <a href="#" class="btn btn-sm btn-outline-primary me-2" data-bs-toggle="modal" data-bs-target="#uploadProfileImageModal">
+                                        <i class="fas fa-camera me-1"></i> Change Photo
+                                    </a>
+                                    <a href="#" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteAccountModal">
+                                        <i class="fas fa-trash me-1"></i> Delete Account
+                                    </a>
+                                </div>
+                            </div>
+                            
+                            <!-- Profile Completion -->
+                            <div class="mb-4">
+                                <div class="d-flex justify-content-between mb-1">
+                                    <small>Profile Completion</small>
+                                    <small><?php echo calculate_student_completion($student); ?>%</small>
+                                </div>
+                                <div class="progress" style="height: 5px;">
+                                    <div class="progress-bar" role="progressbar" style="width: <?php echo calculate_student_completion($student); ?>%"></div>
+                                </div>
+                            </div>
+                            
+                            <!-- Student Info Grid -->
+                            <div class="row">
+                                <!-- Department -->
+                                <div class="col-md-6 mb-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-user-graduate text-primary me-2"></i>
+                                        <span><?php echo escape_output($student['department'] ?? ''); ?></span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Email -->
+                                <div class="col-md-6 mb-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-envelope text-primary me-2"></i>
+                                        <span><?php echo escape_output($student['email'] ?? ''); ?></span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Phone -->
+                                <div class="col-md-6 mb-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-phone text-primary me-2"></i>
+                                        <span><?php echo escape_output($student['phone'] ?? ''); ?></span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Degree/Year -->
+                                <div class="col-md-6 mb-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-graduation-cap text-primary me-2"></i>
+                                        <span><?php echo escape_output($student['degree'] ?? ''); ?>, Year <?php echo escape_output($student['year'] ?? ''); ?></span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Backlogs -->
+                                <div class="col-md-6 mb-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-exclamation-circle text-primary me-2"></i>
+                                        <span>Backlogs: <?php echo escape_output($student['backlogs'] ?? '0'); ?></span>
+                                    </div>
+                                </div>
+                                
+                                <!-- Registration Number -->
+                                <div class="col-md-6 mb-3">
+                                    <div class="d-flex align-items-center">
+                                        <i class="fas fa-id-card text-primary me-2"></i>
+                                        <span>Reg #: <?php echo escape_output($student['reg_number'] ?? ''); ?></span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Address Section -->
+                            <?php if (isset($student['country'])): ?>
+                            <div class="mt-2">
+                                <div class="d-flex align-items-start">
+                                    <i class="fas fa-map-marker-alt text-primary me-2 mt-1"></i>
+                                    <div>
+                                        <h6 class="mb-1">Address</h6>
+                                        <p class="mb-0">
+                                            <?php if (isset($student['address']) && !empty($student['address'])): ?>
+                                                <?php echo escape_output($student['address']); ?><br>
+                                            <?php endif; ?>
+                                            <?php if (isset($student['city']) && !empty($student['city'])): ?>
+                                                <?php echo escape_output($student['city']); ?>, 
+                                            <?php endif; ?>
+                                            <?php if (isset($student['state']) && !empty($student['state'])): ?>
+                                                <?php echo escape_output($student['state']); ?> 
+                                            <?php endif; ?>
+                                            <?php if (isset($student['postal_code']) && !empty($student['postal_code'])): ?>
+                                                <?php echo escape_output($student['postal_code']); ?>
+                                            <?php endif; ?>
+                                            <?php if (isset($student['country']) && !empty($student['country'])): ?>
+                                                <br><?php echo escape_output($student['country']); ?>
+                                            <?php endif; ?>
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <!-- Second Card: Tabs for Skills, Education, etc. -->
+                    <div class="card shadow-sm">
+                        <div class="card-body p-0">
+                            <!-- Tabs -->
+                            <ul class="nav nav-tabs nav-fill border-bottom-0" id="profileTab" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="skills-tab" data-bs-toggle="tab" data-bs-target="#skills-content" type="button">
+                                        <i class="fas fa-code me-2"></i>Skills
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="education-tab" data-bs-toggle="tab" data-bs-target="#education-content" type="button">
+                                        <i class="fas fa-graduation-cap me-2"></i>Education
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="experience-tab" data-bs-toggle="tab" data-bs-target="#experience-content" type="button">
+                                        <i class="fas fa-briefcase me-2"></i>Experience
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="projects-tab" data-bs-toggle="tab" data-bs-target="#projects-content" type="button">
+                                        <i class="fas fa-project-diagram me-2"></i>Projects
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="certifications-tab" data-bs-toggle="tab" data-bs-target="#certifications-content" type="button">
+                                        <i class="fas fa-certificate me-2"></i>Certifications
+                                    </button>
+                                </li>
+                            </ul>
+                            
+                            <!-- Tab Content -->
+                            <div class="tab-content p-4" id="profileTabContent">
+                                <!-- Skills Tab -->
+                                <div class="tab-pane fade show active" id="skills-content" role="tabpanel">
+                                    <?php
+                                    // Get skills from the database
+                                    $skills_query = "SELECT * FROM skills WHERE user_id = ?";
+                                    $stmt = mysqli_prepare($conn, $skills_query);
+                                    mysqli_stmt_bind_param($stmt, "i", $user_id);
+                                    mysqli_stmt_execute($stmt);
+                                    $skills_result = mysqli_stmt_get_result($stmt);
+                                    
+                                    if (mysqli_num_rows($skills_result) > 0) {
+                                        while ($skill = mysqli_fetch_assoc($skills_result)) {
+                                            echo '<span class="skill-badge me-2 mb-2">' . 
+                                                escape_output($skill['name']) . '</span>';
+                                        }
+                                    } else {
+                                        echo '<div class="text-center py-3">';
+                                        echo '<p class="text-muted mb-2">No skills added yet.</p>';
+                                        echo '<button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addSkillModal">';
+                                        echo '<i class="fas fa-plus me-1"></i> Add Skills</button>';
+                                        echo '</div>';
+                                    }
+                                    ?>
+                                </div>
+                                
+                                <!-- Education Tab -->
+                                <div class="tab-pane fade" id="education-content" role="tabpanel">
+                                    <?php
+                                    $education_sql = "SELECT * FROM education WHERE user_id = ? ORDER BY end_date DESC";
+                                    $education_stmt = mysqli_prepare($conn, $education_sql);
+                                    mysqli_stmt_bind_param($education_stmt, "i", $user_id);
+                                    mysqli_stmt_execute($education_stmt);
+                                    $education_result = mysqli_stmt_get_result($education_stmt);
+                                    
+                                    if (mysqli_num_rows($education_result) > 0) {
+                                        while ($education = mysqli_fetch_assoc($education_result)) {
+                                            echo '<div class="mb-3 pb-3 border-bottom">';
+                                            echo '<h6>' . escape_output($education['institution']) . '</h6>';
+                                            echo '<p class="mb-1"><strong>' . escape_output($education['degree']) . '</strong> in ' . escape_output($education['field_of_study']) . '</p>';
+                                            
+                                            // Format dates
+                                            $start_date = isset($education['start_date']) ? date('M Y', strtotime($education['start_date'])) : '';
+                                            $end_date = isset($education['end_date']) ? date('M Y', strtotime($education['end_date'])) : 'Present';
+                                            
+                                            echo '<p class="mb-1 text-muted small">' . $start_date . ' - ' . $end_date . '</p>';
+                                            
+                                            if (isset($education['grade']) && !empty($education['grade'])) {
+                                                echo '<p class="mb-1 small">Grade: ' . escape_output($education['grade']) . '</p>';
+                                            }
+                                            
+                                            echo '</div>';
+                                        }
+                                    } else {
+                                        echo '<div class="text-center py-3">';
+                                        echo '<p class="text-muted mb-2">No education details added yet.</p>';
+                                        echo '<button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addEducationModal">';
+                                        echo '<i class="fas fa-plus me-1"></i> Add Education</button>';
+                                        echo '</div>';
+                                    }
+                                    ?>
+                                </div>
+                                
+                                <!-- Experience Tab -->
+                                <div class="tab-pane fade" id="experience-content" role="tabpanel">
+                                    <?php
+                                    $experience_sql = "SELECT * FROM experience WHERE user_id = ? ORDER BY start_date DESC";
+                                    $experience_stmt = mysqli_prepare($conn, $experience_sql);
+                                    mysqli_stmt_bind_param($experience_stmt, "i", $user_id);
+                                    mysqli_stmt_execute($experience_stmt);
+                                    $experience_result = mysqli_stmt_get_result($experience_stmt);
+                                    
+                                    if (mysqli_num_rows($experience_result) > 0) {
+                                        while ($experience = mysqli_fetch_assoc($experience_result)) {
+                                            echo '<div class="mb-3 pb-3 border-bottom">';
+                                            echo '<h6>' . escape_output($experience['company']) . '</h6>';
+                                            echo '<p class="mb-1"><strong>' . escape_output($experience['position']) . '</strong>';
+                                            if (isset($experience['location']) && !empty($experience['location'])) {
+                                                echo ' - ' . escape_output($experience['location']);
+                                            }
+                                            echo '</p>';
+                                            
+                                            // Format dates
+                                            $start_date = isset($experience['start_date']) ? date('M Y', strtotime($experience['start_date'])) : '';
+                                            $end_date = isset($experience['is_current']) && $experience['is_current'] == 1 ? 'Present' : 
+                                                      (isset($experience['end_date']) ? date('M Y', strtotime($experience['end_date'])) : '');
+                                            
+                                            echo '<p class="mb-1 text-muted small">' . $start_date . ' - ' . $end_date . '</p>';
+                                            
+                                            echo '</div>';
+                                        }
+                                    } else {
+                                        echo '<div class="text-center py-3">';
+                                        echo '<p class="text-muted mb-2">No experience details added yet.</p>';
+                                        echo '<button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addExperienceModal">';
+                                        echo '<i class="fas fa-plus me-1"></i> Add Experience</button>';
+                                        echo '</div>';
+                                    }
+                                    ?>
+                                </div>
+                                
+                                <!-- Projects Tab -->
+                                <div class="tab-pane fade" id="projects-content" role="tabpanel">
+                                    <?php
+                                    $projects_sql = "SELECT * FROM projects WHERE user_id = ? ORDER BY completion_date DESC, start_date DESC";
+                                    $projects_stmt = mysqli_prepare($conn, $projects_sql);
+                                    mysqli_stmt_bind_param($projects_stmt, "i", $user_id);
+                                    mysqli_stmt_execute($projects_stmt);
+                                    $projects_result = mysqli_stmt_get_result($projects_stmt);
+                                    
+                                    if (mysqli_num_rows($projects_result) > 0) {
+                                        while ($project = mysqli_fetch_assoc($projects_result)) {
+                                            echo '<div class="mb-3 pb-3 border-bottom">';
+                                            echo '<h6>' . escape_output($project['title']) . '</h6>';
+                                            
+                                            // Format dates
+                                            $start_date = isset($project['start_date']) ? date('M Y', strtotime($project['start_date'])) : '';
+                                            $completion_date = isset($project['completion_date']) ? date('M Y', strtotime($project['completion_date'])) : 'In Progress';
+                                            
+                                            echo '<p class="mb-1 text-muted small">' . $start_date . ' - ' . $completion_date . '</p>';
+                                            
+                                            if (isset($project['technologies']) && !empty($project['technologies'])) {
+                                                echo '<p class="mb-1">';
+                                                $technologies = explode(',', $project['technologies']);
+                                                foreach ($technologies as $tech) {
+                                                    echo '<span class="technology-badge me-1">' . escape_output(trim($tech)) . '</span>';
+                                                }
+                                                echo '</p>';
+                                            }
+                                            
+                                            echo '</div>';
+                                        }
+                                    } else {
+                                        echo '<div class="text-center py-3">';
+                                        echo '<p class="text-muted mb-2">No projects added yet.</p>';
+                                        echo '<button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addProjectModal">';
+                                        echo '<i class="fas fa-plus me-1"></i> Add Project</button>';
+                                        echo '</div>';
+                                    }
+                                    ?>
+                                </div>
+                                
+                                <!-- Certifications Tab -->
+                                <div class="tab-pane fade" id="certifications-content" role="tabpanel">
+                                    <?php
+                                    $certifications_sql = "SELECT * FROM certifications WHERE user_id = ? ORDER BY issue_date DESC";
+                                    $certifications_stmt = mysqli_prepare($conn, $certifications_sql);
+                                    mysqli_stmt_bind_param($certifications_stmt, "i", $user_id);
+                                    mysqli_stmt_execute($certifications_stmt);
+                                    $certifications_result = mysqli_stmt_get_result($certifications_stmt);
+                                    
+                                    if (mysqli_num_rows($certifications_result) > 0) {
+                                        while ($certification = mysqli_fetch_assoc($certifications_result)) {
+                                            echo '<div class="mb-3 pb-3 border-bottom">';
+                                            echo '<h6>' . escape_output($certification['name']) . '</h6>';
+                                            echo '<p class="mb-1 small">Issued by <strong>' . escape_output($certification['issuing_organization']) . '</strong></p>';
+                                            
+                                            // Format dates
+                                            $issue_date = isset($certification['issue_date']) ? date('M Y', strtotime($certification['issue_date'])) : '';
+                                            
+                                            echo '<p class="mb-1 text-muted small">Issued: ' . $issue_date . '</p>';
+                                            
+                                            echo '</div>';
+                                        }
+                                    } else {
+                                        echo '<div class="text-center py-3">';
+                                        echo '<p class="text-muted mb-2">No certifications added yet.</p>';
+                                        echo '<button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addCertificationModal">';
+                                        echo '<i class="fas fa-plus me-1"></i> Add Certification</button>';
+                                        echo '</div>';
+                                    }
+                                    ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Upload Profile Image Modal -->
+    <div class="modal fade" id="uploadProfileImageModal" tabindex="-1" aria-labelledby="uploadProfileImageModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="uploadProfileImageModalLabel">Change Profile Photo</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="post" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <?php if (isset($profile_image_error)): ?>
+                        <div class="alert alert-danger"><?php echo $profile_image_error; ?></div>
+                        <?php endif; ?>
+                        <div class="text-center mb-4">
+                            <img src="<?php echo get_profile_image($student['profile_image'] ?? null); ?>" alt="Current Profile Image" class="profile-image">
+                            <p class="mt-3">Current Profile Photo</p>
+                        </div>
+                        <div class="mb-3">
+                            <label for="profile_image" class="form-label">New Profile Photo</label>
+                            <input type="file" class="form-control" id="profile_image" name="profile_image" accept=".jpg,.jpeg,.png" required>
+                            <div class="form-text">
+                                Recommended dimensions: 150x150 pixels<br>
+                                Maximum file size: 2MB<br>
+                                Supported formats: JPG, JPEG, PNG
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="upload_profile_image" class="btn btn-primary">Upload</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Document Modal -->
+    <div class="modal fade" id="uploadDocumentModal" tabindex="-1" aria-labelledby="uploadDocumentModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="uploadDocumentModalLabel">Upload Document</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="post" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <?php if (isset($upload_error)): ?>
+                        <div class="alert alert-danger"><?php echo $upload_error; ?></div>
+                        <?php endif; ?>
+                        <div class="mb-3">
+                            <label for="document_name" class="form-label">Document Name</label>
+                            <input type="text" class="form-control" id="document_name" name="document_name" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="document_type" class="form-label">Document Type</label>
+                            <select class="form-select" id="document_type" name="document_type" required>
+                                <option value="">Select document type</option>
+                                <option value="Resume">Resume</option>
+                                <option value="Cover Letter">Cover Letter</option>
+                                <option value="Academic Transcript">Academic Transcript</option>
+                                <option value="Certificate">Certificate</option>
+                                <option value="ID Proof">ID Proof</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="document_file" class="form-label">Document File (PDF or Word)</label>
+                            <input type="file" class="form-control" id="document_file" name="document_file" accept=".pdf,.doc,.docx" required>
+                            <div class="form-text">Maximum file size: 5MB</div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="upload_document" class="btn btn-primary">Upload</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Resume Modal -->
+    <div class="modal fade" id="uploadResumeModal" tabindex="-1" aria-labelledby="uploadResumeModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="uploadResumeModalLabel">Upload Resume</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="post" enctype="multipart/form-data">
+                    <div class="modal-body">
+                        <?php if (isset($resume_error)): ?>
+                        <div class="alert alert-danger"><?php echo $resume_error; ?></div>
+                        <?php endif; ?>
+                        <div class="mb-3">
+                            <label for="resume_file" class="form-label">Resume File (PDF or Word)</label>
+                            <input type="file" class="form-control" id="resume_file" name="resume_file" accept=".pdf,.doc,.docx" required>
+                            <div class="form-text">Maximum file size: 5MB</div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="upload_resume" class="btn btn-primary">Upload</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Certification Modal -->
+    <div class="modal fade" id="addCertificationModal" tabindex="-1" aria-labelledby="addCertificationModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addCertificationModalLabel">Add Certification</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="post">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="certification_name" class="form-label">Certification Name</label>
+                            <input type="text" class="form-control" id="certification_name" name="certification_name" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="issuing_organization" class="form-label">Issuing Organization</label>
+                            <input type="text" class="form-control" id="issuing_organization" name="issuing_organization" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="issue_date" class="form-label">Issue Date</label>
+                            <input type="date" class="form-control" id="issue_date" name="issue_date" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="expiry_date" class="form-label">Expiry Date (if applicable)</label>
+                            <input type="date" class="form-control" id="expiry_date" name="expiry_date">
+                        </div>
+                        <div class="mb-3">
+                            <label for="credential_id" class="form-label">Credential ID</label>
+                            <input type="text" class="form-control" id="credential_id" name="credential_id">
+                        </div>
+                        <div class="mb-3">
+                            <label for="credential_url" class="form-label">Credential URL</label>
+                            <input type="url" class="form-control" id="credential_url" name="credential_url">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="add_certification" class="btn btn-primary">Add Certification</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Project Modal -->
+    <div class="modal fade" id="addProjectModal" tabindex="-1" aria-labelledby="addProjectModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addProjectModalLabel">Add Project</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="post">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="project_title" class="form-label">Project Title</label>
+                            <input type="text" class="form-control" id="project_title" name="project_title" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="project_description" class="form-label">Description</label>
+                            <textarea class="form-control" id="project_description" name="project_description" rows="3" required></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label for="start_date" class="form-label">Start Date</label>
+                            <input type="date" class="form-control" id="start_date" name="start_date">
+                        </div>
+                        <div class="mb-3">
+                            <label for="completion_date" class="form-label">Completion Date (if applicable)</label>
+                            <input type="date" class="form-control" id="completion_date" name="completion_date">
+                        </div>
+                        <div class="mb-3">
+                            <label for="technologies" class="form-label">Technologies Used</label>
+                            <input type="text" class="form-control" id="technologies" name="technologies" placeholder="e.g. React, Node.js, MongoDB">
+                            <div class="form-text">Separate technologies with commas</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="project_url" class="form-label">Project URL</label>
+                            <input type="url" class="form-control" id="project_url" name="project_url">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="add_project" class="btn btn-primary">Add Project</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Skill Modal -->
+    <div class="modal fade" id="addSkillModal" tabindex="-1" aria-labelledby="addSkillModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="addSkillModalLabel">Add Skill</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="post">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="skill_name" class="form-label">Skill Name</label>
+                            <input type="text" class="form-control" id="skill_name" name="skill_name" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="skill_type" class="form-label">Skill Type</label>
+                            <select class="form-select" id="skill_type" name="skill_type" required>
+                                <option value="">Select skill type</option>
+                                <option value="Programming Languages">Programming Languages</option>
+                                <option value="Frameworks">Frameworks</option>
+                                <option value="Databases">Databases</option>
+                                <option value="Tools">Tools</option>
+                                <option value="Soft Skills">Soft Skills</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="proficiency" class="form-label">Proficiency Level</label>
+                            <select class="form-select" id="proficiency" name="proficiency">
+                                <option value="1">Beginner</option>
+                                <option value="2">Elementary</option>
+                                <option value="3" selected>Intermediate</option>
+                                <option value="4">Advanced</option>
+                                <option value="5">Expert</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="add_skill" class="btn btn-primary">Add Skill</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-light py-3 mt-4 border-top">
+        <div class="container text-center">
+            <p class="mb-0 text-muted">© 2023 Campus Placement Portal. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Custom JS -->
+    <script src="js/profile.js"></script>
+    
+    <script>
+    // Handle JSON data that might be embedded in the page
+    document.addEventListener('DOMContentLoaded', function() {
+        // Get the page's HTML content
+        const pageContent = document.documentElement.outerHTML;
+        
+        // Try to find JSON in the page content
+        const jsonStartIndex = pageContent.indexOf('{');
+        const jsonEndIndex = pageContent.indexOf('<!DOCTYPE html>');
+        
+        if (jsonStartIndex !== -1 && jsonEndIndex !== -1 && jsonStartIndex < jsonEndIndex) {
+            let jsonString = pageContent.substring(jsonStartIndex, jsonEndIndex);
+            
+            try {
+                // Parse the JSON
+                let jsonData = JSON.parse(jsonString);
+                console.log('Found embedded JSON data:', jsonData);
+                
+                // Update the UI with the JSON data
+                if (jsonData) {
+                    // Update name and other basic info
+                    if (jsonData.full_name) {
+                        document.querySelectorAll('h1.display-5').forEach(el => {
+                            el.textContent = jsonData.full_name;
+                        });
+                    }
+                    
+                    // Update email
+                    if (jsonData.email) {
+                        document.querySelectorAll('.fa-envelope').forEach(el => {
+                            el.nextElementSibling.textContent = jsonData.email;
+                        });
+                    }
+                    
+                    // Update department/branch
+                    if (jsonData.department) {
+                        document.querySelectorAll('.fa-user-graduate').forEach(el => {
+                            el.nextElementSibling.textContent = jsonData.department;
+                        });
+                    }
+                    
+                    // Update skills
+                    if (jsonData.skills && jsonData.skills.length > 0) {
+                        const skillsContainer = document.querySelector('#skills .card-body');
+                        if (skillsContainer) {
+                            let skillsHTML = '<div class="d-flex flex-wrap">';
+                            jsonData.skills.forEach(skill => {
+                                skillsHTML += `
+                                    <div class="skills-badge d-flex align-items-center">
+                                        ${skill.name || skill.skill_name}
+                                        <button class="btn btn-sm text-danger border-0 ms-2 p-0" 
+                                               onclick="removeSkill(${skill.id})">
+                                            <i class="fas fa-times-circle"></i>
+                                        </button>
+                                    </div>
+                                `;
+                            });
+                            skillsHTML += '</div>';
+                            skillsContainer.innerHTML = skillsHTML;
+                        }
+                    }
+                    
+                    // Update projects
+                    if (jsonData.projects && jsonData.projects.length > 0) {
+                        const projectsContainer = document.querySelector('#projects .card-body');
+                        if (projectsContainer) {
+                            let projectsHTML = '<div class="table-responsive"><table class="table table-hover"><thead class="table-light"><tr><th>Title</th><th>Description</th><th>Technologies</th><th>Actions</th></tr></thead><tbody>';
+                            jsonData.projects.forEach(project => {
+                                projectsHTML += `
+                                    <tr>
+                                        <td>${project.title || ''}</td>
+                                        <td>${project.description || ''}</td>
+                                        <td>${project.technologies || ''}</td>
+                                        <td>
+                                            <a href="${project.project_url || '#'}" class="btn btn-sm btn-outline-primary" target="_blank">
+                                                <i class="fas fa-external-link-alt me-1"></i>View
+                                            </a>
+                                        </td>
+                                    </tr>
+                                `;
+                            });
+                            projectsHTML += '</tbody></table></div>';
+                            projectsContainer.innerHTML = projectsHTML;
+                        }
+                    }
+                    
+                    // Update education
+                    if (jsonData.education && jsonData.education.length > 0) {
+                        const educationContainer = document.querySelector('#education .profile-card .card-body');
+                        if (educationContainer) {
+                            let educationHTML = '<div class="timeline">';
+                            jsonData.education.forEach(edu => {
+                                educationHTML += `
+                                    <div class="card mb-3">
+                                        <div class="card-body">
+                                            <div class="d-flex justify-content-between align-items-center">
+                                                <h5 class="card-title mb-1">${edu.degree || ''}</h5>
+                                                <div>
+                                                    <button class="btn btn-sm btn-outline-primary me-1" onclick="editEducation(${edu.id})">
+                                                        <i class="fas fa-edit"></i>
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-danger" onclick="deleteEducation(${edu.id})">
+                                                        <i class="fas fa-trash"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <h6 class="card-subtitle mb-2 text-muted">${edu.institution || ''}</h6>
+                                            ${edu.grade ? `<p class="card-text mb-1"><i class="fas fa-star me-2"></i>Grade: ${edu.grade}</p>` : ''}
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                            educationHTML += '</div>';
+                            educationContainer.innerHTML = educationHTML;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing JSON:', error);
+            }
+        }
+    });
+    </script>
+</body>
+</html>
+<?php
+// Close database connection
+mysqli_close($conn);
+?>

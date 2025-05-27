@@ -1,0 +1,3 @@
+This is a placeholder for the default profile image.
+Please add a 150x150 pixel image named "default-profile.jpg" in this directory.
+The image will be used as default profile picture for users who have not uploaded their own photo. 
