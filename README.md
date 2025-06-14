@@ -6,7 +6,9 @@ A comprehensive web-based placement management system for college students and a
 
 ## 🚀 Deployment (Demo)
 
-🖥 [Live Demo ](placementportal.42web.io)
+🖥 Live Demo- placementportal.42web.io
+
+Copy Paste it in url section and click on continue to site and click on Details and down you can see a link called this unsafe site click on that You can access to my website
 
 
 
