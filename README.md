@@ -8,7 +8,14 @@ A comprehensive web-based placement management system for college students and a
 
 🖥 Live Demo- [placementportal.42web.io](https://placementportal.42web.io/)
 
+---
+## 🧪 Dummy Credentials
 
+| Role         | Username     | Password |
+|--------------|--------------|----------|
+| Student      | AP23110011343|05-03-2001|
+
+> You can modify or add users directly in the database.
 
 
 
@@ -87,17 +94,6 @@ http://localhost/placement-portal/index.php
 ```
 
 ---
-
-## 🧪 Dummy Credentials
-
-| Role         | Username     | Password |
-|--------------|--------------|----------|
-| Student      | AP23110011343|05-03-2001|
-
-> You can modify or add users directly in the database.
-
----
-
 
 
 ---
